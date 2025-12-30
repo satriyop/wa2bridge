@@ -1,12 +1,18 @@
 {
   "name": "wa2bridge",
-  "version": "1.0.0",
-  "description": "Minimal WhatsApp Bridge for WhatsApp2App using Baileys",
+  "version": "2.0.0",
+  "description": "Enterprise WhatsApp Bridge with Anti-Ban Protection for WhatsApp2App",
   "main": "src/index.js",
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch src/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "validate": "node src/validate-env.js",
+    "lint": "eslint src/",
+    "prestart": "node src/validate-env.js"
   },
   "author": "",
   "license": "MIT",
@@ -16,7 +22,14 @@
     "express": "^4.21.1",
     "pino": "^9.5.0",
     "qrcode": "^1.5.4",
-    "qrcode-terminal": "^0.12.0"
+    "qrcode-terminal": "^0.12.0",
+    "swagger-jsdoc": "^6.2.8",
+    "swagger-ui-express": "^5.0.0"
+  },
+  "devDependencies": {
+    "vitest": "^1.6.0",
+    "@vitest/coverage-v8": "^1.6.0",
+    "eslint": "^8.57.0"
   },
   "engines": {
     "node": ">=18.0.0"

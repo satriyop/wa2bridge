@@ -14,4 +14,17 @@ insights.md
   - wa:simulate bypasses HTTP and directly dispatches the job - faster, good for testing processing logic
   - Use --process flag with wa:webhook to auto-run queue jobs immediately
   ─────────────────────────────────────────────────
-  
+
+  ⏺ ★ Insight ─────────────────────────────────────
+  Key Implementation Patterns:
+  1. Randomized delays use a variance percentage (±30-40%) applied to base values, ensuring no two messages have identical timing patterns
+  2. Typing duration scales with message length - simulating real human typing speed (~50ms/char) makes longer messages take longer to "compose"
+  3. Browser fingerprint persistence - storing in JSON and rotating every 24-48 hours balances fingerprint stability (needed for trust) with variation (to avoid detection)
+  ─────────────────────────────────────────────────
+
+  ⏺ ★ Insight ─────────────────────────────────────
+  Advanced Anti-Ban Patterns Implemented:
+  1. Presence cycling simulates human online/offline behavior - stays offline during "sleep hours" (11PM-7AM default) and cycles between online (5-45min) and offline (2-15min) during active hours
+  2. Ban warning system uses a risk scoring algorithm - tracks delivery failures, rate limit hits, connection drops, and blocks to calculate risk level (NORMAL → ELEVATED → HIGH → CRITICAL)
+  3. Message variation adds natural entropy to avoid content fingerprinting - varies punctuation, greetings, and supports Indonesian casual variations (e.g., "tidak" → "nggak")
+  ─────────────────────────────────────────────────
