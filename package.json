@@ -3,10 +3,16 @@
   "version": "2.0.0",
   "description": "Enterprise WhatsApp Bridge with Anti-Ban Protection for WhatsApp2App",
   "main": "src/index.js",
+  "types": "types/index.d.ts",
   "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./types": "./types/index.d.ts"
+  },
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
+    "cli": "node src/cli.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
@@ -27,9 +33,10 @@
     "swagger-ui-express": "^5.0.0"
   },
   "devDependencies": {
-    "vitest": "^1.6.0",
     "@vitest/coverage-v8": "^1.6.0",
-    "eslint": "^8.57.0"
+    "eslint": "^8.57.0",
+    "supertest": "^7.1.4",
+    "vitest": "^1.6.0"
   },
   "engines": {
     "node": ">=18.0.0"

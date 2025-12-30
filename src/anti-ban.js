@@ -3831,6 +3831,20 @@ export class SessionManager {
       backupDir: this.backupDir,
     };
   }
+
+  /**
+   * Get backup info (alias for getStatus with additional details)
+   */
+  getBackupInfo() {
+    const backups = this.listBackups();
+    return {
+      lastBackupTime: this.lastBackupTime,
+      autoBackupActive: this.backupTimer !== null,
+      backupCount: backups.length,
+      maxBackups: this.maxBackups,
+      latestBackup: backups[0] || null,
+    };
+  }
 }
 
 // =============================================================================

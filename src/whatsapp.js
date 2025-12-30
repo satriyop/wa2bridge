@@ -65,7 +65,49 @@ import {
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+/**
+ * @typedef {import('../types/index.js').SendMessageResponse} SendMessageResponse
+ * @typedef {import('../types/index.js').StatusResponse} StatusResponse
+ * @typedef {import('../types/index.js').DeliveryStatus} DeliveryStatus
+ */
+
+/**
+ * @typedef {Object} WhatsAppClientOptions
+ * @property {number} [messageDelay=1500] - Base delay between messages (ms)
+ * @property {number} [typingDelay=500] - Typing indicator duration (ms)
+ * @property {string} [webhookUrl] - URL for incoming message webhooks
+ * @property {number} [accountAgeWeeks=4] - WhatsApp account age in weeks
+ * @property {number} [activeHoursStart=7] - Hour to start activity (0-23)
+ * @property {number} [activeHoursEnd=23] - Hour to end activity (0-23)
+ * @property {string} [logLevel='info'] - Pino log level
+ * @property {function} [onMessage] - Callback for incoming messages
+ */
+
+/**
+ * WhatsApp client with comprehensive anti-ban protection.
+ *
+ * Features 6 phases of anti-ban protection:
+ * - Phase 1: Human-like timing, rate limiting, fingerprint rotation
+ * - Phase 2: Contact warmup, delivery tracking, weekend patterns
+ * - Phase 3: Conversation memory, spam detection, geo matching
+ * - Phase 4: Block detection, session backup, persistent queues
+ * - Phase 5: Analytics, sentiment analysis, auto-responder
+ * - Phase 6: Enhanced webhooks with retry logic
+ *
+ * @example
+ * ```javascript
+ * const client = new WhatsAppClient({
+ *   webhookUrl: 'http://localhost/webhook',
+ *   accountAgeWeeks: 8,
+ * });
+ * await client.connect();
+ * await client.sendMessage('+6281234567890', 'Hello!');
+ * ```
+ */
 class WhatsAppClient {
+  /**
+   * @param {WhatsAppClientOptions} [options] - Client configuration
+   */
   constructor(options = {}) {
     this.socket = null;
     this.qrCode = null;
@@ -625,11 +667,37 @@ class WhatsAppClient {
   }
 
   /**
-   * Send message with human-like behavior
-   * Implements: typing indicators, randomized delays, rate limiting,
-   * presence management, message variation, ban warning checks,
-   * contact warmup, weekend patterns, group behavior, emoji enhancement,
-   * message splitting, conversation memory, spam detection
+   * Send a message with comprehensive anti-ban protection.
+   *
+   * Implements human-like behavior including:
+   * - Typing indicators with variable duration
+   * - Randomized delays (1-3 seconds)
+   * - Rate limiting based on account age
+   * - Presence management (online/offline)
+   * - Message variation to avoid content detection
+   * - Contact warmup for new recipients
+   * - Weekend/holiday pattern adjustments
+   * - Group behavior differences
+   * - Optional emoji enhancement
+   * - Long message splitting
+   * - Conversation memory tracking
+   * - Spam detection warnings
+   *
+   * @param {string} to - Phone number ("+6281234567890") or JID ("628...@s.whatsapp.net")
+   * @param {string} text - Message text content
+   * @param {string} [replyToMessageId] - Message ID to reply to (optional)
+   * @returns {Promise<{key: {id: string}}>} Message result with ID
+   * @throws {Error} If not connected, rate limited, or banned
+   *
+   * @example
+   * ```javascript
+   * // Simple message
+   * const result = await client.sendMessage('+6281234567890', 'Hello!');
+   * console.log('Sent:', result.key.id);
+   *
+   * // Reply to a message
+   * await client.sendMessage('+6281234567890', 'Thanks!', originalMessageId);
+   * ```
    */
   async sendMessage(to, text, replyToMessageId = null) {
     if (!this.isConnected) {
@@ -923,6 +991,23 @@ class WhatsAppClient {
     return `${normalized}@s.whatsapp.net`;
   }
 
+  /**
+   * Get comprehensive status of the WhatsApp client.
+   *
+   * Includes connection state, statistics, and all anti-ban feature statuses.
+   *
+   * @returns {StatusResponse} Complete status object
+   *
+   * @example
+   * ```javascript
+   * const status = client.getStatus();
+   * if (status.connected) {
+   *   console.log(`Connected as ${status.name} (${status.phone})`);
+   *   console.log(`Messages sent: ${status.stats.messagesSent}`);
+   *   console.log(`Ban risk: ${status.banWarning.currentLevel}`);
+   * }
+   * ```
+   */
   getStatus() {
     return {
       connected: this.isConnected,
@@ -936,40 +1021,40 @@ class WhatsAppClient {
           ? Math.floor((Date.now() - this.stats.startedAt) / 1000)
           : 0,
       },
-      rateLimits: this.rateLimiter.getStats(),
-      activity: this.activityTracker.getStats(),
-      reconnection: this.reconnectionManager.getState(),
+      rateLimits: this.rateLimiter?.getStats?.() || {},
+      activity: this.activityTracker?.getStats?.() || {},
+      reconnection: this.reconnectionManager?.getState?.() || {},
       // Phase 1 features
-      presence: this.presenceManager.getStatus(),
-      banWarning: this.banWarning.getMetrics(),
+      presence: this.presenceManager?.getStatus?.() || {},
+      banWarning: this.banWarning?.getMetrics?.() || {},
       // Phase 2 features
-      delivery: this.deliveryTracker.getStats(),
-      activityRamp: this.activityRamper.getStatus(),
-      weekendPatterns: this.weekendPatterns.getStatus(),
-      messageQueue: this.messageScheduler.getStatus(),
-      networkHealth: this.networkFingerprint.checkNetworkHealth(),
+      delivery: this.deliveryTracker?.getStats?.() || {},
+      activityRamp: this.activityRamper?.getStatus?.() || {},
+      weekendPatterns: this.weekendPatterns?.getStatus?.() || {},
+      messageQueue: this.messageScheduler?.getStatus?.() || {},
+      networkHealth: this.networkFingerprint?.checkNetworkHealth?.() || {},
       // Phase 3 features
-      spamDetection: this.spamDetector.getMetrics(),
-      geoMatch: this.geoMatcher.getStatus(),
-      statusViewer: this.statusViewer.getStatus(),
-      profileViewer: this.profileViewer.getStats(),
-      activeConversations: this.conversationMemory.getActiveConversations().length,
+      spamDetection: this.spamDetector?.getMetrics?.() || {},
+      geoMatch: this.geoMatcher?.getStatus?.() || {},
+      statusViewer: this.statusViewer?.getStatus?.() || {},
+      profileViewer: this.profileViewer?.getStats?.() || {},
+      activeConversations: this.conversationMemory?.getActiveConversations?.()?.length || 0,
       // Phase 4 features
-      blockDetector: this.blockDetector.getStats(),
-      sessionBackup: this.sessionManager.getBackupInfo(),
-      persistentQueue: this.persistentQueue.getStats(),
-      webhookRetry: this.webhookManager.getStats(),
-      healthMonitor: this.healthMonitor.getStatus(),
+      blockDetector: this.blockDetector?.getStats?.() || {},
+      sessionBackup: this.sessionManager?.getBackupInfo?.() || {},
+      persistentQueue: this.persistentQueue?.getStats?.() || {},
+      webhookRetry: this.webhookManager?.getStats?.() || {},
+      healthMonitor: this.healthMonitor?.getStatus?.() || {},
       // Phase 5 features
-      analytics: this.analytics.getSummary(),
-      contactScoring: this.contactScoring.getStats(),
-      sentiment: this.sentimentDetector.getStats(),
-      ipWhitelist: this.ipWhitelist.getStatus(),
-      auditLogs: this.auditLogger.getStats(),
-      apiRateLimiter: this.apiRateLimiter.getStats(),
-      autoResponder: this.autoResponder.getStats(),
-      templates: this.messageTemplates.getStats(),
-      scheduledMessages: this.scheduledMessages.getStats(),
+      analytics: this.analytics?.getSummary?.() || {},
+      contactScoring: this.contactScoring?.getStats?.() || {},
+      sentiment: this.sentimentDetector?.getStats?.() || {},
+      ipWhitelist: this.ipWhitelist?.getStatus?.() || {},
+      auditLogs: this.auditLogger?.getStats?.() || {},
+      apiRateLimiter: this.apiRateLimiter?.getStats?.() || {},
+      autoResponder: this.autoResponder?.getStats?.() || {},
+      templates: this.messageTemplates?.getStats?.() || {},
+      scheduledMessages: this.scheduledMessages?.getStats?.() || {},
     };
   }
 

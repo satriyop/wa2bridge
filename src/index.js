@@ -73,6 +73,10 @@ const whatsapp = new WhatsAppClient({
 // Create API server
 const app = createApiServer(whatsapp, { apiSecret: API_SECRET });
 
+// Server reference for graceful shutdown
+let server = null;
+let isShuttingDown = false;
+
 // Start everything
 async function start() {
   try {
@@ -81,11 +85,12 @@ async function start() {
     await whatsapp.connect();
 
     // Start HTTP server
-    app.listen(PORT, HOST, () => {
+    server = app.listen(PORT, HOST, () => {
       console.log(`API server running at http://${HOST}:${PORT}`);
       console.log('');
       console.log('Endpoints:');
-      console.log(`  GET  /health              - Health check`);
+      console.log(`  GET  /health              - Liveness probe (process alive)`);
+      console.log(`  GET  /health/ready        - Readiness probe (ready for traffic)`);
       console.log(`  GET  /api/status          - Full status + all metrics`);
       console.log(`  GET  /api/qr              - Get QR code for scanning`);
       console.log(`  POST /api/send            - Send message (protected)`);
@@ -251,17 +256,62 @@ async function start() {
   }
 }
 
-// Handle graceful shutdown
-process.on('SIGINT', async () => {
-  console.log('\nShutting down...');
-  await whatsapp.disconnect();
-  process.exit(0);
-});
+// Graceful shutdown handler
+async function gracefulShutdown(signal) {
+  if (isShuttingDown) {
+    console.log('Shutdown already in progress...');
+    return;
+  }
+  isShuttingDown = true;
 
-process.on('SIGTERM', async () => {
-  console.log('\nShutting down...');
+  console.log(`\n${signal} received, shutting down gracefully...`);
+
+  // 1. Stop accepting new HTTP connections
+  if (server) {
+    console.log('Closing HTTP server...');
+    server.close(() => {
+      console.log('HTTP server closed');
+    });
+  }
+
+  // 2. Drain persistent queue (max 30s timeout)
+  if (whatsapp.persistentQueue) {
+    console.log('Draining message queue...');
+    try {
+      await Promise.race([
+        whatsapp.persistentQueue.processQueue(),
+        new Promise((resolve) => setTimeout(resolve, 30000)),
+      ]);
+      console.log('Queue drained');
+    } catch (error) {
+      console.error('Queue drain error:', error.message);
+    }
+  }
+
+  // 3. Drain webhook retry queue
+  if (whatsapp.webhookManager) {
+    console.log('Processing pending webhooks...');
+    try {
+      await Promise.race([
+        whatsapp.webhookManager.processRetryQueue(),
+        new Promise((resolve) => setTimeout(resolve, 10000)),
+      ]);
+      console.log('Webhooks processed');
+    } catch (error) {
+      console.error('Webhook process error:', error.message);
+    }
+  }
+
+  // 4. Disconnect WhatsApp
+  console.log('Disconnecting WhatsApp...');
   await whatsapp.disconnect();
+
+  console.log('Shutdown complete');
   process.exit(0);
-});
+}
+
+// Handle shutdown signals
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
 start();

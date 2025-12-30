@@ -1,35 +1,235 @@
 import express from 'express';
+import crypto from 'crypto';
 import QRCode from 'qrcode';
 import { setupSwagger } from './swagger.js';
 
+/**
+ * @typedef {import('../types/index.js').SendMessageRequest} SendMessageRequest
+ * @typedef {import('../types/index.js').SendMessageResponse} SendMessageResponse
+ * @typedef {import('../types/index.js').StatusResponse} StatusResponse
+ * @typedef {import('../types/index.js').QRResponse} QRResponse
+ * @typedef {import('../types/index.js').QueueMessageRequest} QueueMessageRequest
+ * @typedef {import('../types/index.js').MessagePriority} MessagePriority
+ */
+
+/**
+ * @typedef {Object} ApiServerOptions
+ * @property {string} [apiSecret] - Bearer token for API authentication
+ */
+
+/**
+ * Creates the Express API server for wa2bridge
+ *
+ * @param {import('./whatsapp.js').default} whatsappClient - WhatsApp client instance
+ * @param {ApiServerOptions} [options] - Server configuration options
+ * @returns {import('express').Express} Configured Express app
+ *
+ * @example
+ * ```javascript
+ * const app = createApiServer(whatsappClient, { apiSecret: 'my-secret' });
+ * app.listen(3000);
+ * ```
+ */
 export function createApiServer(whatsappClient, options = {}) {
   const app = express();
   const apiSecret = options.apiSecret;
 
   app.use(express.json());
 
-  // Auth middleware
-  const authenticate = (req, res, next) => {
-    if (!apiSecret) {
-      return next(); // No auth if no secret configured
+  // ==========================================================================
+  // CORS Configuration
+  // ==========================================================================
+  app.use((req, res, next) => {
+    // Allow requests from any origin (configure CORS_ORIGIN env var for production)
+    const allowedOrigin = process.env.CORS_ORIGIN || '*';
+    res.set('Access-Control-Allow-Origin', allowedOrigin);
+    res.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Request-ID');
+    res.set('Access-Control-Expose-Headers', 'X-Request-ID');
+
+    // Handle preflight requests
+    if (req.method === 'OPTIONS') {
+      return res.status(204).send();
     }
 
-    const auth = req.headers.authorization;
-    if (!auth || !auth.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'Unauthorized' });
+    next();
+  });
+
+  // ==========================================================================
+  // Request ID Tracing
+  // ==========================================================================
+  let requestCounter = 0;
+  app.use((req, res, next) => {
+    // Use provided ID or generate one
+    const requestId = req.get('X-Request-ID') || `req_${Date.now()}_${++requestCounter}`;
+    req.requestId = requestId;
+    res.set('X-Request-ID', requestId);
+    next();
+  });
+
+  // Request logging middleware (with request ID)
+  app.use((req, res, next) => {
+    const start = Date.now();
+    const { method, path, ip, requestId } = req;
+
+    res.on('finish', () => {
+      const duration = Date.now() - start;
+      const { statusCode } = res;
+      // Skip health checks to reduce noise
+      if (path === '/health' || path === '/health/ready') return;
+      console.log(`[${requestId}] ${method} ${path} ${statusCode} ${duration}ms [${ip}]`);
+    });
+
+    next();
+  });
+
+  // ==========================================================================
+  // IP-based Rate Limiting
+  // ==========================================================================
+  const ipRateLimits = new Map();
+  const IP_RATE_LIMIT = 100;        // requests per window
+  const IP_RATE_WINDOW = 60 * 1000; // 1 minute window
+
+  /**
+   * Clean up expired rate limit entries
+   */
+  const cleanupRateLimits = () => {
+    const now = Date.now();
+    for (const [ip, data] of ipRateLimits.entries()) {
+      if (now - data.windowStart > IP_RATE_WINDOW) {
+        ipRateLimits.delete(ip);
+      }
+    }
+  };
+
+  // Cleanup every minute
+  setInterval(cleanupRateLimits, 60000);
+
+  /**
+   * IP rate limiting middleware
+   */
+  const ipRateLimit = (req, res, next) => {
+    // Skip rate limiting for health checks
+    if (req.path === '/health' || req.path === '/health/ready') {
+      return next();
     }
 
-    const token = auth.slice(7);
-    if (token !== apiSecret) {
-      return res.status(401).json({ error: 'Invalid token' });
+    const ip = req.ip || req.connection?.remoteAddress || 'unknown';
+    const now = Date.now();
+
+    let data = ipRateLimits.get(ip);
+
+    if (!data || now - data.windowStart > IP_RATE_WINDOW) {
+      // New window
+      data = { count: 1, windowStart: now };
+      ipRateLimits.set(ip, data);
+      return next();
+    }
+
+    data.count++;
+
+    if (data.count > IP_RATE_LIMIT) {
+      const retryAfter = Math.ceil((IP_RATE_WINDOW - (now - data.windowStart)) / 1000);
+      res.set('Retry-After', String(retryAfter));
+      return res.status(429).json({
+        error: 'Too many requests',
+        message: `Rate limit exceeded. Try again in ${retryAfter} seconds.`,
+        retryAfter,
+      });
     }
 
     next();
   };
 
-  // Health check (no auth required)
+  app.use(ipRateLimit);
+
+  // Security: Warn if no API secret configured
+  if (!apiSecret) {
+    console.warn('⚠️  WARNING: No API_SECRET configured!');
+    console.warn('⚠️  Protected endpoints are accessible without authentication.');
+    console.warn('⚠️  Set API_SECRET environment variable for production use.');
+  }
+
+  /**
+   * Timing-safe token comparison to prevent timing attacks.
+   * @param {string} provided - Token from request
+   * @param {string} expected - Expected secret token
+   * @returns {boolean}
+   */
+  const safeCompare = (provided, expected) => {
+    if (typeof provided !== 'string' || typeof expected !== 'string') {
+      return false;
+    }
+    // Ensure same length comparison to prevent length-based timing leaks
+    const a = Buffer.from(provided);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length) {
+      // Compare against expected anyway to maintain constant time
+      crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(expected));
+      return false;
+    }
+    return crypto.timingSafeEqual(a, b);
+  };
+
+  // Auth middleware
+  const authenticate = (req, res, next) => {
+    if (!apiSecret) {
+      return next(); // No auth if no secret (dev mode warning shown at startup)
+    }
+
+    const auth = req.headers.authorization;
+    if (!auth || !auth.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Unauthorized', message: 'Bearer token required' });
+    }
+
+    const token = auth.slice(7);
+    if (!safeCompare(token, apiSecret)) {
+      return res.status(401).json({ error: 'Unauthorized', message: 'Invalid token' });
+    }
+
+    next();
+  };
+
+  // Liveness probe - is the process alive? (no auth required)
   app.get('/health', (req, res) => {
-    res.json({ status: 'ok', timestamp: new Date().toISOString() });
+    const mem = process.memoryUsage();
+    res.json({
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
+      memory: {
+        heapUsed: Math.round(mem.heapUsed / 1024 / 1024),  // MB
+        heapTotal: Math.round(mem.heapTotal / 1024 / 1024), // MB
+        rss: Math.round(mem.rss / 1024 / 1024),             // MB
+      },
+    });
+  });
+
+  // Readiness probe - is it ready to handle requests? (no auth required)
+  app.get('/health/ready', (req, res) => {
+    const status = whatsappClient.getStatus();
+    const banWarning = status.banWarning || {};
+    const isHibernating = banWarning.hibernationMode === true;
+    const isConnected = status.connected === true;
+
+    // Ready if connected and not hibernating
+    if (isConnected && !isHibernating) {
+      return res.json({
+        ready: true,
+        connected: true,
+        hibernating: false,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    // Not ready - return 503 Service Unavailable
+    res.status(503).json({
+      ready: false,
+      connected: isConnected,
+      hibernating: isHibernating,
+      reason: !isConnected ? 'WhatsApp not connected' : 'In hibernation mode',
+      timestamp: new Date().toISOString(),
+    });
   });
 
   // Get WhatsApp status
@@ -100,13 +300,30 @@ export function createApiServer(whatsappClient, options = {}) {
     `);
   });
 
-  // Send message
+  /**
+   * Send a message
+   * @route POST /api/send
+   * @param {SendMessageRequest} req.body - Message details
+   * @returns {SendMessageResponse} Send result
+   */
   app.post('/api/send', authenticate, async (req, res) => {
     try {
+      /** @type {SendMessageRequest} */
       const { to, message, reply_to } = req.body;
 
       if (!to || !message) {
         return res.status(400).json({ error: 'Missing "to" or "message"' });
+      }
+
+      // Validate phone number format
+      // Accepts: +6281234567890, 6281234567890, 6281234567890@s.whatsapp.net
+      const phoneRegex = /^\+?\d{10,15}(@s\.whatsapp\.net)?$/;
+      const cleanPhone = to.replace(/[\s-]/g, ''); // Remove spaces and dashes
+      if (!phoneRegex.test(cleanPhone)) {
+        return res.status(400).json({
+          error: 'Invalid phone number format',
+          message: 'Use format: +6281234567890 or 6281234567890',
+        });
       }
 
       const result = await whatsappClient.sendMessage(to, message, reply_to);
@@ -1077,6 +1294,28 @@ export function createApiServer(whatsappClient, options = {}) {
     } catch (error) {
       res.status(500).json({ error: error.message });
     }
+  });
+
+  // Global error handler - catches unhandled errors
+  app.use((err, req, res, next) => {
+    console.error(`[${req.requestId}] Unhandled error:`, err);
+
+    // Don't leak error details in production
+    const isDev = process.env.NODE_ENV !== 'production';
+
+    res.status(err.status || 500).json({
+      error: err.message || 'Internal server error',
+      requestId: req.requestId,
+      ...(isDev && { stack: err.stack }),
+    });
+  });
+
+  // 404 handler for undefined routes
+  app.use((req, res) => {
+    res.status(404).json({
+      error: 'Not found',
+      message: `Route ${req.method} ${req.path} not found`,
+    });
   });
 
   // Setup Swagger documentation

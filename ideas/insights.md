@@ -28,3 +28,22 @@ insights.md
   2. Ban warning system uses a risk scoring algorithm - tracks delivery failures, rate limit hits, connection drops, and blocks to calculate risk level (NORMAL → ELEVATED → HIGH → CRITICAL)
   3. Message variation adds natural entropy to avoid content fingerprinting - varies punctuation, greetings, and supports Indonesian casual variations (e.g., "tidak" → "nggak")
   ─────────────────────────────────────────────────
+
+
+  ⏺ ★ Insight ─────────────────────────────────────
+  Graceful Shutdown Pattern: The key elements are:
+  1. Idempotency - isShuttingDown flag prevents double-shutdown
+  2. Order matters - Stop accepting connections FIRST, then drain work
+  3. Timeouts - Promise.race prevents hanging on stuck queues
+  ─────────────────────────────────────────────────
+
+⏺ ★ Insight ─────────────────────────────────────
+  Timing Attack Prevention: Simple === comparison leaks info via response time differences. crypto.timingSafeEqual takes constant time regardless of where strings differ. The "compare against self" trick when lengths differ maintains constant-time behavior even for length mismatches.
+  ─────────────────────────────────────────────────
+
+  ★ Insight ─────────────────────────────────────
+  CLI Design Patterns Used:
+  1. Laravel Prompts - Interactive selection when --app not provided
+  2. Component-based output - $this->components->task() for progress indication
+  3. Two-column details - Clean key-value display for metadata
+  ─────────────────────────────────────────────────
