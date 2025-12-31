@@ -10,6 +10,19 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
+      // SSE endpoint needs special handling (no buffering)
+      '/api/events': {
+        target: WA2BRIDGE_URL,
+        changeOrigin: true,
+        // Critical for SSE: disable response buffering
+        configure: (proxy) => {
+          proxy.on('proxyRes', (proxyRes) => {
+            // Prevent buffering for SSE
+            proxyRes.headers['cache-control'] = 'no-cache'
+            proxyRes.headers['x-accel-buffering'] = 'no'
+          })
+        },
+      },
       // Proxy API calls to wa2bridge backend
       '/api': {
         target: WA2BRIDGE_URL,

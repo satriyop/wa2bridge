@@ -63,6 +63,9 @@ import {
   ScheduledMessages,
 } from './anti-ban.js';
 
+// Phase 6: Enhanced webhook events
+import { WebhookEventEmitter } from './webhook-events.js';
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
@@ -281,6 +284,14 @@ class WhatsAppClient {
       logger: this.logger,
     });
 
+    // Phase 6: Enhanced webhook event emitter
+    this.webhookEmitter = new WebhookEventEmitter({
+      webhookUrl: this.webhookUrl,
+      apiSecret: options.apiSecret,
+      sessionsDir: this.sessionsDir,
+      enabled: !!this.webhookUrl, // Only enable if webhook URL is configured
+    });
+
     this.healthMonitor = new HealthMonitor({
       sessionsDir: this.sessionsDir,
       logger: this.logger,
@@ -400,6 +411,9 @@ class WhatsAppClient {
         console.log('\n Scan this QR code with WhatsApp:\n');
         qrcode.generate(qr, { small: true });
         console.log('\nOr use GET /api/qr to get the QR code string\n');
+
+        // Phase 6: Emit QR update webhook
+        this.webhookEmitter.qrUpdate(qr);
       }
 
       if (connection === 'close') {
@@ -419,6 +433,9 @@ class WhatsAppClient {
         const errorMessage = lastDisconnect?.error?.message || 'Unknown error';
 
         this.logger.info({ statusCode, errorMessage }, 'Connection closed');
+
+        // Phase 6: Emit connection close webhook
+        this.webhookEmitter.connectionClose(errorMessage);
 
         // Handle different disconnect reasons with proper backoff
         if (statusCode === DisconnectReason.loggedOut) {
@@ -481,6 +498,9 @@ class WhatsAppClient {
         if (user) {
           this.phoneNumber = user.id.split(':')[0];
           this.userName = user.name || 'Unknown';
+
+          // Phase 6: Emit connection open webhook
+          this.webhookEmitter.connectionOpen(this.phoneNumber, this.userName);
         }
 
         this.logger.info(`Connected as ${this.phoneNumber} (${this.userName})`);
@@ -522,12 +542,18 @@ class WhatsAppClient {
           this.deliveryTracker.updateStatus(messageId, 'delivered');
           // Phase 4: Record delivery for block detection
           if (phone) this.blockDetector.recordMessageDelivered(messageId, `+${phone}`);
+          // Phase 6: Emit delivery webhook
+          if (phone) this.webhookEmitter.messageDelivered(messageId, `+${phone}`);
         } else if (status === 4) {
           // READ (blue double check)
           this.deliveryTracker.updateStatus(messageId, 'read');
+          // Phase 6: Emit read webhook
+          if (phone) this.webhookEmitter.messageRead(messageId, `+${phone}`);
         } else if (status === 5) {
           // PLAYED (for voice messages)
           this.deliveryTracker.updateStatus(messageId, 'read');
+          // Phase 6: Emit read webhook
+          if (phone) this.webhookEmitter.messageRead(messageId, `+${phone}`);
         }
       }
     });
@@ -650,6 +676,19 @@ class WhatsAppClient {
       this.logger.info({ from, reason: 'forward_skip' }, 'Skipping reply to forwarded message');
       return; // Don't forward to webhook for skipped forwards
     }
+
+    // Phase 6: Emit message received webhook
+    this.webhookEmitter.messageReceived({
+      from: `+${from}`,
+      message: text,
+      messageId,
+      timestamp: message.messageTimestamp,
+      shouldReply: replyCheck.shouldReply,
+      replyProbability: replyCheck.probability,
+      isForward: forwardInfo.isForward,
+      forwardCount: forwardInfo.forwardCount || 0,
+      conversationContext: this.conversationMemory.getContext(`+${from}`),
+    });
 
     // Call the message handler with enhanced context
     await this.onMessage({
@@ -922,6 +961,13 @@ class WhatsAppClient {
       rateLimitStats: this.rateLimiter.getStats(),
       banWarningLevel: this.banWarning.currentLevel,
     }, 'Message sent');
+
+    // Phase 6: Emit message sent webhook
+    this.webhookEmitter.messageSent({
+      to,
+      messageId: result.key.id,
+      message: processedText,
+    });
 
     return result;
   }

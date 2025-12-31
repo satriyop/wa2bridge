@@ -73,6 +73,56 @@ const whatsapp = new WhatsAppClient({
 // Create API server
 const app = createApiServer(whatsapp, { apiSecret: API_SECRET });
 
+// ==========================================================================
+// Real-Time Event Broadcasting (SSE)
+// ==========================================================================
+
+/**
+ * Set up real-time event broadcasting from WhatsApp client to dashboard
+ */
+function setupEventBroadcasting() {
+  // Broadcast status changes periodically (every 2 seconds for live updates)
+  setInterval(() => {
+    if (app.broadcast) {
+      const status = whatsapp.getStatus();
+      app.broadcast('status', status);
+
+      // Also broadcast rate limits and ban warning
+      if (whatsapp.rateLimiter?.getStats) {
+        app.broadcast('rate-limits', whatsapp.rateLimiter.getStats());
+      }
+      if (whatsapp.banWarning?.getStatus) {
+        app.broadcast('ban-warning', whatsapp.banWarning.getStatus());
+      }
+    }
+  }, 2000);
+
+  // Hook into webhookEmitter for instant event notifications
+  if (whatsapp.webhookEmitter) {
+    const originalEmit = whatsapp.webhookEmitter.emit.bind(whatsapp.webhookEmitter);
+    whatsapp.webhookEmitter.emit = (eventType, data) => {
+      // Call original emit
+      originalEmit(eventType, data);
+
+      // Broadcast to SSE clients
+      if (app.broadcast) {
+        app.broadcast('webhook-event', { type: eventType, data, timestamp: new Date().toISOString() });
+
+        // Also broadcast specific event types
+        if (eventType.startsWith('message.')) {
+          app.broadcast(eventType.replace('.', '-'), data);
+        }
+        if (eventType.startsWith('connection.')) {
+          // Trigger immediate status update on connection changes
+          app.broadcast('status', whatsapp.getStatus());
+        }
+      }
+    };
+  }
+
+  console.log('Real-time event broadcasting enabled');
+}
+
 // Server reference for graceful shutdown
 let server = null;
 let isShuttingDown = false;
@@ -173,6 +223,7 @@ async function start() {
       console.log(`  GET  /api/scheduled/stats - Scheduled stats`);
       console.log('');
       console.log('Phase 6 Endpoints (Enhanced Webhooks):');
+      console.log(`  GET  /api/events          - Real-time SSE stream`);
       console.log(`  GET  /api/webhooks        - Webhook status & stats`);
       console.log(`  GET  /api/webhooks/events - Available event types`);
       console.log(`  GET  /api/webhooks/history - Recent event history`);
@@ -249,6 +300,9 @@ async function start() {
       console.log('  - Message templates with variables');
       console.log('  - Scheduled messages (one-time, daily, weekly)');
       console.log('='.repeat(50));
+
+      // Enable real-time event broadcasting for dashboard
+      setupEventBroadcasting();
     });
   } catch (error) {
     console.error('Failed to start:', error);

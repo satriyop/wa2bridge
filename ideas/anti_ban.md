@@ -102,3 +102,47 @@
   [Record metrics for ban warning]
       ↓
   [Return to offline cycle]
+
+
+    Anti-Ban Components Overview
+
+  1. Rate Limiter (src/anti-ban.js)
+
+  ┌─────────────────────────────────────────────────────┐
+  │                   Rate Limiter                       │
+  ├─────────────────────────────────────────────────────┤
+  │  Hourly Window    │  Max 30 msgs/hour (configurable)│
+  │  Daily Window     │  Max 150 msgs/day               │
+  │  Cooldown         │  Auto-pause when approaching    │
+  │  Window Reset     │  Sliding window, not fixed      │
+  └─────────────────────────────────────────────────────┘
+
+  Key Logic: Uses timestamps array, filters to window, counts against limit.
+
+  2. Ban Warning System (src/anti-ban.js)
+
+  Risk Levels:
+    normal   → riskScore < 30  → Green light
+    elevated → riskScore 30-60 → Slow down
+    high     → riskScore 60-80 → Pause recommended
+    critical → riskScore > 80  → Auto-hibernate
+
+  Factors: Message velocity, error rate, rate limit hits, time since last warning.
+
+  3. Typing Simulator (src/anti-ban.js)
+
+  Simulates human typing:
+    1. composing presence (shows "typing...")
+    2. Variable delay based on message length
+    3. Random hesitation pauses
+    4. Occasional "paused" state (thinking)
+
+  4. Contact Warmup (src/anti-ban.js)
+
+  New Contact Flow:
+    Day 1-3:  Max 3 messages, long delays
+    Day 4-7:  Max 10 messages, medium delays
+    Day 8+:   Normal limits
+
+  Purpose: WhatsApp flags accounts that blast new contacts immediately.
+

@@ -18,8 +18,10 @@ const status = ref({
 })
 
 const rateLimits = ref({
-  hourly: { used: 0, limit: 30, remaining: 30 },
-  daily: { used: 0, limit: 150, remaining: 150 },
+  hourlyCount: 0,
+  hourlyLimit: 30,
+  dailyCount: 0,
+  dailyLimit: 150,
 })
 
 const banWarning = ref({
@@ -29,9 +31,9 @@ const banWarning = ref({
 })
 
 const analytics = ref({
-  totalSent: 0,
-  totalReceived: 0,
-  peakHours: [],
+  totalMessagesSent: 0,
+  totalMessagesReceived: 0,
+  peakHours: {},
 })
 
 const recentMessages = ref([])
@@ -39,6 +41,7 @@ const webhookEvents = ref([])
 const loading = ref(true)
 const error = ref(null)
 const lastUpdate = ref(null)
+const sseConnected = ref(false)
 
 // API base URL (empty for proxy, or full URL for direct)
 const API_BASE = ''
@@ -57,37 +60,26 @@ async function apiFetch(endpoint) {
   return res.json()
 }
 
-// Fetch status from API
-async function fetchStatus() {
-  try {
-    const data = await apiFetch('/api/status')
-    status.value = data
-    lastUpdate.value = new Date()
-    error.value = null
-  } catch (e) {
-    error.value = e.message
+// Process ban warning data (shared between SSE and fetch)
+function processBanWarning(bw) {
+  const levelScores = { normal: 10, elevated: 40, high: 70, critical: 95 }
+  const riskScore = levelScores[bw.currentLevel] || 0
+  const recommendations = {
+    normal: 'Normal operation',
+    elevated: 'Reduce message frequency',
+    high: 'Pause sending, wait 1-2 hours',
+    critical: 'Stop immediately, risk of ban',
+  }
+  return {
+    riskScore,
+    isHibernating: bw.hibernationMode || false,
+    recommendation: recommendations[bw.currentLevel] || 'Normal operation',
+    currentLevel: bw.currentLevel,
+    metrics: bw,
   }
 }
 
-// Fetch rate limits
-async function fetchRateLimits() {
-  try {
-    rateLimits.value = await apiFetch('/api/rate-limits')
-  } catch (e) {
-    console.error('Rate limits fetch error:', e)
-  }
-}
-
-// Fetch ban warning
-async function fetchBanWarning() {
-  try {
-    banWarning.value = await apiFetch('/api/ban-warning')
-  } catch (e) {
-    console.error('Ban warning fetch error:', e)
-  }
-}
-
-// Fetch analytics
+// Fetch analytics (not streamed via SSE)
 async function fetchAnalytics() {
   try {
     analytics.value = await apiFetch('/api/analytics')
@@ -96,7 +88,7 @@ async function fetchAnalytics() {
   }
 }
 
-// Fetch webhook events
+// Fetch webhook events history (initial load only)
 async function fetchWebhookEvents() {
   try {
     const data = await apiFetch('/api/webhooks/history?limit=10')
@@ -106,30 +98,143 @@ async function fetchWebhookEvents() {
   }
 }
 
-// Refresh all data
+// Refresh all data (manual refresh or fallback)
 async function refreshAll() {
   loading.value = true
-  await Promise.all([
-    fetchStatus(),
-    fetchRateLimits(),
-    fetchBanWarning(),
-    fetchAnalytics(),
-    fetchWebhookEvents(),
-  ])
+  try {
+    const [statusData, rateLimitsData, banWarningData, analyticsData, webhookData] = await Promise.all([
+      apiFetch('/api/status'),
+      apiFetch('/api/rate-limits'),
+      apiFetch('/api/ban-warning'),
+      apiFetch('/api/analytics'),
+      apiFetch('/api/webhooks/history?limit=10'),
+    ])
+    status.value = statusData
+    rateLimits.value = rateLimitsData.rateLimits || rateLimitsData
+    banWarning.value = processBanWarning(banWarningData.banWarning || banWarningData)
+    analytics.value = analyticsData
+    webhookEvents.value = webhookData.events || []
+    lastUpdate.value = new Date()
+    error.value = null
+  } catch (e) {
+    error.value = e.message
+  }
   loading.value = false
 }
 
-// Polling interval
-let pollInterval = null
+// ==========================================================================
+// Server-Sent Events (Real-Time Updates)
+// ==========================================================================
+let eventSource = null
+let reconnectTimeout = null
+let analyticsInterval = null
+
+function connectSSE() {
+  if (eventSource) {
+    eventSource.close()
+  }
+
+  eventSource = new EventSource(`${API_BASE}/api/events`)
+
+  eventSource.onopen = () => {
+    console.log('[SSE] Connected')
+    sseConnected.value = true
+    error.value = null
+  }
+
+  eventSource.onerror = (e) => {
+    console.error('[SSE] Connection error:', e)
+    sseConnected.value = false
+    eventSource.close()
+
+    // Reconnect after 3 seconds
+    reconnectTimeout = setTimeout(() => {
+      console.log('[SSE] Reconnecting...')
+      connectSSE()
+    }, 3000)
+  }
+
+  // Handle status updates
+  eventSource.addEventListener('status', (e) => {
+    try {
+      status.value = JSON.parse(e.data)
+      lastUpdate.value = new Date()
+    } catch (err) {
+      console.error('[SSE] Failed to parse status:', err)
+    }
+  })
+
+  // Handle rate limits updates
+  eventSource.addEventListener('rate-limits', (e) => {
+    try {
+      const data = JSON.parse(e.data)
+      rateLimits.value = data.rateLimits || data
+    } catch (err) {
+      console.error('[SSE] Failed to parse rate-limits:', err)
+    }
+  })
+
+  // Handle ban warning updates
+  eventSource.addEventListener('ban-warning', (e) => {
+    try {
+      const data = JSON.parse(e.data)
+      banWarning.value = processBanWarning(data.banWarning || data)
+    } catch (err) {
+      console.error('[SSE] Failed to parse ban-warning:', err)
+    }
+  })
+
+  // Handle webhook events (prepend to list)
+  eventSource.addEventListener('webhook-event', (e) => {
+    try {
+      const event = JSON.parse(e.data)
+      webhookEvents.value = [event, ...webhookEvents.value.slice(0, 9)]
+    } catch (err) {
+      console.error('[SSE] Failed to parse webhook-event:', err)
+    }
+  })
+
+  // Handle message events
+  eventSource.addEventListener('message-sent', (e) => {
+    try {
+      const msg = JSON.parse(e.data)
+      recentMessages.value = [{ ...msg, direction: 'out' }, ...recentMessages.value.slice(0, 19)]
+    } catch (err) {
+      console.error('[SSE] Failed to parse message-sent:', err)
+    }
+  })
+
+  eventSource.addEventListener('message-received', (e) => {
+    try {
+      const msg = JSON.parse(e.data)
+      recentMessages.value = [{ ...msg, direction: 'in' }, ...recentMessages.value.slice(0, 19)]
+    } catch (err) {
+      console.error('[SSE] Failed to parse message-received:', err)
+    }
+  })
+}
 
 onMounted(() => {
+  // Initial data fetch
   refreshAll()
-  // Poll every 5 seconds
-  pollInterval = setInterval(refreshAll, 5000)
+
+  // Connect to SSE for real-time updates
+  connectSSE()
+
+  // Analytics don't stream via SSE, poll every 30 seconds
+  analyticsInterval = setInterval(fetchAnalytics, 30000)
 })
 
 onUnmounted(() => {
-  if (pollInterval) clearInterval(pollInterval)
+  if (eventSource) {
+    eventSource.close()
+  }
+  if (reconnectTimeout) {
+    clearTimeout(reconnectTimeout)
+  }
+  if (analyticsInterval) {
+    clearInterval(analyticsInterval)
+  }
 })
 
 // Format uptime
@@ -166,8 +271,16 @@ function formatUptime(ms) {
         </div>
 
         <div class="flex items-center space-x-4">
+          <!-- SSE Connection Indicator -->
+          <span
+            class="flex items-center space-x-1 text-xs px-2 py-1 rounded"
+            :class="sseConnected ? 'bg-green-900 text-green-300' : 'bg-yellow-900 text-yellow-300'"
+          >
+            <span class="w-2 h-2 rounded-full" :class="sseConnected ? 'bg-green-400' : 'bg-yellow-400 animate-pulse'"></span>
+            <span>{{ sseConnected ? 'Live' : 'Connecting...' }}</span>
+          </span>
           <span v-if="lastUpdate" class="text-gray-500 text-sm">
-            Updated: {{ lastUpdate.toLocaleTimeString() }}
+            {{ lastUpdate.toLocaleTimeString() }}
           </span>
           <button
             @click="refreshAll"
@@ -202,19 +315,19 @@ function formatUptime(ms) {
         />
         <StatusCard
           title="Uptime"
-          :value="formatUptime(status.uptime)"
+          :value="formatUptime(status.stats?.uptime * 1000)"
           icon="⏱️"
           subtitle="Since last connect"
         />
         <StatusCard
           title="Messages Sent"
-          :value="analytics.totalSent?.toString() || '0'"
+          :value="analytics.totalMessagesSent?.toString() || '0'"
           icon="📤"
           subtitle="Total outgoing"
         />
         <StatusCard
           title="Messages Received"
-          :value="analytics.totalReceived?.toString() || '0'"
+          :value="analytics.totalMessagesReceived?.toString() || '0'"
           icon="📥"
           subtitle="Total incoming"
         />
@@ -224,13 +337,13 @@ function formatUptime(ms) {
       <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
         <RateLimitGauge
           title="Hourly Limit"
-          :used="rateLimits.hourly?.used || 0"
-          :limit="rateLimits.hourly?.limit || 30"
+          :used="rateLimits.hourlyCount || 0"
+          :limit="rateLimits.hourlyLimit || 30"
         />
         <RateLimitGauge
           title="Daily Limit"
-          :used="rateLimits.daily?.used || 0"
-          :limit="rateLimits.daily?.limit || 150"
+          :used="rateLimits.dailyCount || 0"
+          :limit="rateLimits.dailyLimit || 150"
         />
         <BanRiskMeter
           :riskScore="banWarning.riskScore || 0"

@@ -1,5 +1,6 @@
 node_modules/
 sessions/
+coverage/
 .env
 *.log
 .DS_Store

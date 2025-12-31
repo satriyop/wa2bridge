@@ -105,6 +105,31 @@ export function createApiServer(whatsappClient, options = {}) {
   // Cleanup every minute
   setInterval(cleanupRateLimits, 60000);
 
+  // ==========================================================================
+  // Server-Sent Events (SSE) for Real-Time Dashboard Updates
+  // ==========================================================================
+  const sseClients = new Set();
+
+  /**
+   * Broadcast event to all connected SSE clients
+   * @param {string} event - Event name (status, rate-limits, ban-warning, etc.)
+   * @param {Object} data - Event data
+   */
+  const broadcast = (event, data) => {
+    const message = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+    for (const client of sseClients) {
+      try {
+        client.write(message);
+      } catch (e) {
+        // Client disconnected, will be cleaned up
+        sseClients.delete(client);
+      }
+    }
+  };
+
+  // Expose broadcast function on the app for external use
+  app.broadcast = broadcast;
+
   /**
    * IP rate limiting middleware
    */
@@ -1294,6 +1319,82 @@ export function createApiServer(whatsappClient, options = {}) {
     } catch (error) {
       res.status(500).json({ error: error.message });
     }
+  });
+
+  // ==========================================================================
+  // Server-Sent Events Endpoint
+  // ==========================================================================
+
+  /**
+   * @swagger
+   * /api/events:
+   *   get:
+   *     summary: Real-time event stream (SSE)
+   *     description: |
+   *       Server-Sent Events endpoint for real-time dashboard updates.
+   *       Connect using EventSource API in the browser.
+   *
+   *       Events emitted:
+   *       - `status` - Connection status changes
+   *       - `rate-limits` - Rate limit updates
+   *       - `ban-warning` - Ban risk changes
+   *       - `message-sent` - Message sent notification
+   *       - `message-received` - Incoming message notification
+   *       - `webhook-event` - Webhook activity
+   *     tags: [Real-Time]
+   *     responses:
+   *       200:
+   *         description: SSE stream established
+   *         content:
+   *           text/event-stream:
+   *             schema:
+   *               type: string
+   */
+  app.get('/api/events', (req, res) => {
+    // Set SSE headers
+    res.set({
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no', // Disable nginx buffering
+    });
+
+    // Send initial connection event with current state
+    const status = whatsappClient.getStatus();
+    res.write(`event: connected\ndata: ${JSON.stringify({ message: 'SSE connection established' })}\n\n`);
+    res.write(`event: status\ndata: ${JSON.stringify(status)}\n\n`);
+
+    // Send rate limits if available
+    if (whatsappClient.rateLimiter?.getStats) {
+      const rateLimits = whatsappClient.rateLimiter.getStats();
+      res.write(`event: rate-limits\ndata: ${JSON.stringify(rateLimits)}\n\n`);
+    }
+
+    // Send ban warning if available
+    if (whatsappClient.banWarning?.getStatus) {
+      const banWarning = whatsappClient.banWarning.getStatus();
+      res.write(`event: ban-warning\ndata: ${JSON.stringify(banWarning)}\n\n`);
+    }
+
+    // Add client to broadcast set
+    sseClients.add(res);
+    console.log(`[SSE] Client connected (total: ${sseClients.size})`);
+
+    // Keep-alive ping every 30 seconds
+    const keepAlive = setInterval(() => {
+      try {
+        res.write(`: ping\n\n`);
+      } catch (e) {
+        clearInterval(keepAlive);
+      }
+    }, 30000);
+
+    // Clean up on disconnect
+    req.on('close', () => {
+      clearInterval(keepAlive);
+      sseClients.delete(res);
+      console.log(`[SSE] Client disconnected (total: ${sseClients.size})`);
+    });
   });
 
   // Global error handler - catches unhandled errors
