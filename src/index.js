@@ -1,48 +1,33 @@
 import 'dotenv/config';
 import WhatsAppClient from './whatsapp.js';
 import { createApiServer } from './api.js';
+import { config } from './config.js';
 
-const PORT = process.env.PORT || 3000;
-const HOST = process.env.HOST || '0.0.0.0';
-const API_SECRET = process.env.API_SECRET;
-const WEBHOOK_URL = process.env.WEBHOOK_URL;
-const MESSAGE_DELAY = parseInt(process.env.MESSAGE_DELAY_MS || '1500', 10);
-const TYPING_DELAY = parseInt(process.env.TYPING_DELAY_MS || '500', 10);
-const LOG_LEVEL = process.env.LOG_LEVEL || 'info';
-
-// Anti-ban configuration
-// Account age affects rate limits:
-// - Week 1 (new): 5/hour, 15/day - very conservative
-// - Week 2-4: 15/hour, 40/day - warming up
-// - Month 2+ (8+ weeks): 30/hour, 150/day - mature account
-const ACCOUNT_AGE_WEEKS = parseInt(process.env.ACCOUNT_AGE_WEEKS || '4', 10);
-
-// Active hours for presence simulation (24-hour format)
-const ACTIVE_HOURS_START = parseInt(process.env.ACTIVE_HOURS_START || '7', 10);
-const ACTIVE_HOURS_END = parseInt(process.env.ACTIVE_HOURS_END || '23', 10);
+// Destructure config for convenience
+const { server, auth, webhook, timing, account, sse } = config;
 
 console.log('='.repeat(50));
 console.log('WA2Bridge - WhatsApp Bridge for WhatsApp2App');
 console.log('='.repeat(50));
 console.log('');
 console.log('Anti-Ban Protection: ENABLED');
-console.log(`Account Age: ${ACCOUNT_AGE_WEEKS} weeks`);
-console.log(`Active Hours: ${ACTIVE_HOURS_START}:00 - ${ACTIVE_HOURS_END}:00`);
+console.log(`Account Age: ${account.ageWeeks} weeks`);
+console.log(`Active Hours: ${account.activeHoursStart}:00 - ${account.activeHoursEnd}:00`);
 console.log('');
 
 // Create WhatsApp client with anti-ban settings
 const whatsapp = new WhatsAppClient({
-  messageDelay: MESSAGE_DELAY,
-  typingDelay: TYPING_DELAY,
-  webhookUrl: WEBHOOK_URL,
-  logLevel: LOG_LEVEL,
-  accountAgeWeeks: ACCOUNT_AGE_WEEKS,  // For rate limiting
-  activeHoursStart: ACTIVE_HOURS_START,  // For presence simulation
-  activeHoursEnd: ACTIVE_HOURS_END,
-  apiSecret: API_SECRET,  // For WebhookManager
+  messageDelay: timing.messageDelayMs,
+  typingDelay: timing.typingDelayMs,
+  webhookUrl: webhook.url,
+  logLevel: server.logLevel,
+  accountAgeWeeks: account.ageWeeks,  // For rate limiting
+  activeHoursStart: account.activeHoursStart,  // For presence simulation
+  activeHoursEnd: account.activeHoursEnd,
+  apiSecret: auth.apiSecret,  // For WebhookManager
   onMessage: async (message) => {
     // Forward to Laravel webhook using WebhookManager (with retry)
-    if (!WEBHOOK_URL) {
+    if (!webhook.url) {
       console.log('No webhook URL configured, message not forwarded');
       return;
     }
@@ -71,7 +56,7 @@ const whatsapp = new WhatsAppClient({
 });
 
 // Create API server
-const app = createApiServer(whatsapp, { apiSecret: API_SECRET });
+const app = createApiServer(whatsapp, { apiSecret: auth.apiSecret });
 
 // ==========================================================================
 // Real-Time Event Broadcasting (SSE)
@@ -127,7 +112,7 @@ function setupEventBroadcasting() {
 }
 
 // Server reference for graceful shutdown
-let server = null;
+let httpServer = null;
 let isShuttingDown = false;
 
 // Start everything
@@ -138,8 +123,8 @@ async function start() {
     await whatsapp.connect();
 
     // Start HTTP server
-    server = app.listen(PORT, HOST, () => {
-      console.log(`API server running at http://${HOST}:${PORT}`);
+    httpServer = app.listen(server.port, server.host, () => {
+      console.log(`API server running at http://${server.host}:${server.port}`);
       console.log('');
       console.log('Endpoints:');
       console.log(`  GET  /health              - Liveness probe (process alive)`);
@@ -238,8 +223,8 @@ async function start() {
       console.log(`  POST /api/webhooks/test   - Send test webhook`);
       console.log('');
 
-      if (WEBHOOK_URL) {
-        console.log(`Webhook: ${WEBHOOK_URL}`);
+      if (webhook.url) {
+        console.log(`Webhook: ${webhook.url}`);
       } else {
         console.log('Warning: No WEBHOOK_URL configured');
       }
@@ -330,9 +315,9 @@ async function gracefulShutdown(signal) {
   }
 
   // 1. Stop accepting new HTTP connections
-  if (server) {
+  if (httpServer) {
     console.log('Closing HTTP server...');
-    server.close(() => {
+    httpServer.close(() => {
       console.log('HTTP server closed');
     });
   }

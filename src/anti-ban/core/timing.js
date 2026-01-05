@@ -7,6 +7,8 @@
  * CRITICAL: Always use these instead of fixed delays.
  */
 
+import { config } from '../../config.js';
+
 /**
  * Generate a randomized delay with variance to avoid detection
  * WhatsApp ML detects fixed timing patterns - this adds ±variance% jitter
@@ -15,7 +17,7 @@
  * @param {number} variancePercent - Variance as decimal (0.3 = ±30%)
  * @returns {number} Randomized delay in milliseconds
  */
-export function humanDelay(baseMs, variancePercent = 0.3) {
+export function humanDelay(baseMs, variancePercent = config.timing.variance) {
   const variance = baseMs * variancePercent;
   const min = Math.floor(baseMs - variance);
   const max = Math.ceil(baseMs + variance);
@@ -31,9 +33,9 @@ export function humanDelay(baseMs, variancePercent = 0.3) {
  * @param {number} maxDuration - Maximum typing duration
  * @returns {number} Typing duration in milliseconds
  */
-export function calculateTypingDuration(text, minDuration = 1000, maxDuration = 6000) {
+export function calculateTypingDuration(text, minDuration = config.timing.minTypingMs, maxDuration = config.timing.maxTypingMs) {
   // Average typing speed: ~40-60ms per character with variance
-  const msPerChar = humanDelay(50, 0.4);
+  const msPerChar = humanDelay(config.timing.msPerChar, config.timing.variance);
   const baseDuration = text.length * msPerChar;
 
   // Clamp between min and max
@@ -68,9 +70,9 @@ export function calculateReadDelay(messageOrLength) {
 
   // Average reading speed: ~200-300ms per word (~5 chars)
   const words = Math.ceil(messageLength / 5);
-  const readTime = words * humanDelay(250, 0.3);
-  // Minimum 500ms, maximum 5000ms
-  return Math.min(Math.max(readTime, 500), 5000);
+  const readTime = words * humanDelay(config.timing.readMsPerWord, config.timing.variance);
+  // Clamp between min and max read delay
+  return Math.min(Math.max(readTime, config.timing.minReadDelayMs), config.timing.maxReadDelayMs);
 }
 
 /**

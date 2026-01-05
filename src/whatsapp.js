@@ -72,6 +72,12 @@ import { LifecycleManager } from './lifecycle-manager.js';
 // Timer management (prevents leaks on disconnect)
 import { TimerRegistry } from './utils/timer-registry.js';
 
+// Pure utility functions
+import { normalizeJid, getDisconnectReasonName } from './whatsapp-utilities.js';
+
+// Centralized configuration
+import { config } from './config.js';
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
@@ -125,8 +131,8 @@ class WhatsAppClient {
     this.userName = null;
 
     // Base delays (will be randomized)
-    this.baseMessageDelay = options.messageDelay || 1500;
-    this.baseTypingDelay = options.typingDelay || 500;
+    this.baseMessageDelay = options.messageDelay || config.timing.messageDelayMs;
+    this.baseTypingDelay = options.typingDelay || config.timing.typingDelayMs;
     this.webhookUrl = options.webhookUrl;
     this.onMessage = options.onMessage || (() => {});
 
@@ -145,14 +151,14 @@ class WhatsAppClient {
 
     // Anti-ban components
     this.rateLimiter = new MessageRateLimiter({
-      accountAgeWeeks: options.accountAgeWeeks || 4, // Default to 4 weeks (warming)
+      accountAgeWeeks: options.accountAgeWeeks || config.account.ageWeeks,
       sessionsDir: this.sessionsDir,
     });
 
     this.reconnectionManager = new ReconnectionManager({
-      baseDelay: 1000,
-      maxDelay: 300000,  // 5 minutes max
-      maxAttempts: 15,
+      baseDelay: config.reconnection.baseDelayMs,
+      maxDelay: config.reconnection.maxDelayMs,
+      maxAttempts: config.reconnection.maxAttempts,
     });
 
     this.activityTracker = new ActivityTracker(this.sessionsDir);
@@ -160,8 +166,8 @@ class WhatsAppClient {
     // New anti-ban components
     this.presenceManager = new PresenceManager({
       sessionsDir: this.sessionsDir,
-      activeHoursStart: options.activeHoursStart ?? 7,
-      activeHoursEnd: options.activeHoursEnd ?? 23,
+      activeHoursStart: options.activeHoursStart ?? config.account.activeHoursStart,
+      activeHoursEnd: options.activeHoursEnd ?? config.account.activeHoursEnd,
     });
 
     this.banWarning = new BanWarningSystem({
@@ -186,21 +192,15 @@ class WhatsAppClient {
     });
 
     this.weekendPatterns = new WeekendPatterns({
-      // Indonesian holidays can be added here
-      holidays: [
-        '01-01', // New Year
-        '12-25', // Christmas
-        '12-31', // New Year's Eve
-        '08-17', // Indonesian Independence Day
-      ],
+      holidays: config.patterns.holidays,
     });
 
     this.typingSimulator = new TypingSimulator({
-      correctionProbability: 0.15, // 15% chance of "typing correction"
+      correctionProbability: config.probabilities.correction,
     });
 
     this.emojiEnhancer = new EmojiEnhancer({
-      probability: 0.2, // 20% of messages get emoji
+      probability: config.probabilities.emoji,
     });
 
     this.contactWarmup = new ContactWarmup({
@@ -208,8 +208,8 @@ class WhatsAppClient {
     });
 
     this.groupBehavior = new GroupBehavior({
-      groupDelayMultiplier: 2.0,      // 2x slower in groups
-      groupResponseProbability: 0.7,  // 70% response rate in groups
+      groupDelayMultiplier: config.groups.delayMultiplier,
+      groupResponseProbability: config.groups.responseRate,
     });
 
     this.networkFingerprint = new NetworkFingerprint({
@@ -224,22 +224,22 @@ class WhatsAppClient {
 
     // Phase 3: Additional anti-ban components
     this.reactionManager = new ReactionManager({
-      reactionProbability: 0.15, // 15% of messages get a reaction
+      reactionProbability: config.probabilities.reaction,
     });
 
     this.replyProbability = new ReplyProbability({
-      baseReplyRate: 0.9, // 90% reply rate (humans don't reply to everything)
+      baseReplyRate: config.probabilities.baseReply,
       sessionsDir: this.sessionsDir,
     });
 
     this.messageSplitter = new MessageSplitter({
-      maxLength: 500,       // Max 500 chars per message
-      splitThreshold: 300,  // Start splitting at 300 chars
+      maxLength: config.messageSplit.maxLength,
+      splitThreshold: config.messageSplit.splitThreshold,
     });
 
     this.statusViewer = new StatusViewer({
       sessionsDir: this.sessionsDir,
-      viewProbability: 0.6,
+      viewProbability: config.probabilities.statusView,
     });
 
     this.spamDetector = new SpamReportDetector({
@@ -255,16 +255,16 @@ class WhatsAppClient {
 
     this.profileViewer = new ProfileViewer({
       sessionsDir: this.sessionsDir,
-      viewProbability: 0.1, // 10% chance to view profile
+      viewProbability: config.probabilities.profileView,
     });
 
     this.forwardHandler = new ForwardHandler({
-      forwardReplyProbability: 0.5, // 50% reply to forwards
+      forwardReplyProbability: config.forwards.replyProbability,
     });
 
     this.conversationMemory = new ConversationMemory({
       sessionsDir: this.sessionsDir,
-      maxMessages: 20,
+      maxMessages: config.conversationMemory.maxMessages,
     });
 
     // Phase 4: Detection & Recovery components
@@ -277,7 +277,7 @@ class WhatsAppClient {
 
     this.sessionManager = new SessionManager({
       sessionsDir: this.sessionsDir,
-      maxBackups: 5,
+      maxBackups: config.session.maxBackups,
     });
 
     this.persistentQueue = new PersistentQueue({
@@ -406,10 +406,10 @@ class WhatsAppClient {
       auth: state,
       logger: pino({ level: 'warn' }),
       browser: browserFingerprint,  // Rotating fingerprint instead of hardcoded
-      syncFullHistory: false,
-      connectTimeoutMs: 60000,
-      defaultQueryTimeoutMs: 60000,
-      markOnlineOnConnect: false,
+      syncFullHistory: config.network.syncFullHistory,
+      connectTimeoutMs: config.network.connectTimeoutMs,
+      defaultQueryTimeoutMs: config.network.queryTimeoutMs,
+      markOnlineOnConnect: config.network.markOnlineOnConnect,
       ...(version && { version }),
     });
 
@@ -573,25 +573,17 @@ class WhatsAppClient {
     // Phase 2: Periodically check network fingerprint
     this.networkCheckInterval = setInterval(() => {
       this.networkFingerprint.recordIP().catch(() => {});
-    }, 5 * 60 * 1000); // Every 5 minutes
+    }, config.network.networkCheckIntervalMs);
 
     return this;
   }
 
   /**
    * Get human-readable disconnect reason
+   * @deprecated Use getDisconnectReasonName from whatsapp-utilities.js directly
    */
   getDisconnectReasonName(statusCode) {
-    const reasons = {
-      [DisconnectReason.badSession]: 'Bad Session',
-      [DisconnectReason.connectionClosed]: 'Connection Closed',
-      [DisconnectReason.connectionLost]: 'Connection Lost',
-      [DisconnectReason.connectionReplaced]: 'Connection Replaced',
-      [DisconnectReason.loggedOut]: 'Logged Out',
-      [DisconnectReason.restartRequired]: 'Restart Required',
-      [DisconnectReason.timedOut]: 'Timed Out',
-    };
-    return reasons[statusCode] || `Unknown (${statusCode})`;
+    return getDisconnectReasonName(statusCode);
   }
 
   async handleIncomingMessage(message) {
@@ -637,7 +629,7 @@ class WhatsAppClient {
         this.sendMessage(`+${from}`, autoResponse.response).catch(err => {
           this.logger.error({ error: err.message }, 'Auto-response failed');
         });
-      }, 2000 + Math.random() * 3000); // 2-5 second delay
+      }, config.timing.autoReplyMinMs + Math.random() * (config.timing.autoReplyMaxMs - config.timing.autoReplyMinMs));
     }
 
     // Phase 3: Check if forwarded message (different handling)
@@ -875,7 +867,7 @@ class WhatsAppClient {
     await delay(humanDelay(100, 0.5));
 
     // 3. Calculate typing duration (adjusted for weekend/group)
-    let typingDuration = calculateTypingDuration(processedText, 1000, 6000);
+    let typingDuration = calculateTypingDuration(processedText, config.timing.minTypingMs, config.timing.maxTypingMs);
     typingDuration = Math.floor(typingDuration * weekendDelayMultiplier);
     typingDuration = this.groupBehavior.adjustTypingDuration(typingDuration, jid);
 
@@ -1032,21 +1024,12 @@ class WhatsAppClient {
     return results[results.length - 1];
   }
 
+  /**
+   * Normalize phone number to JID format
+   * @deprecated Use normalizeJid from whatsapp-utilities.js directly
+   */
   normalizeJid(phone) {
-    // Remove all non-numeric characters
-    let normalized = phone.replace(/\D/g, '');
-
-    // Handle Indonesian numbers
-    if (normalized.startsWith('0')) {
-      normalized = '62' + normalized.slice(1);
-    }
-
-    // Remove leading + if present
-    if (normalized.startsWith('+')) {
-      normalized = normalized.slice(1);
-    }
-
-    return `${normalized}@s.whatsapp.net`;
+    return normalizeJid(phone);
   }
 
   /**

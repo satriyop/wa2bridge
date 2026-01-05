@@ -57,9 +57,10 @@ describe('humanDelay', () => {
   });
 
   it('should use default variance when not specified', () => {
+    // Default variance from config is 0.4 (±40%)
     const result = humanDelay(1000);
-    expect(result).toBeGreaterThanOrEqual(700);
-    expect(result).toBeLessThanOrEqual(1300);
+    expect(result).toBeGreaterThanOrEqual(600); // 1000 - 40%
+    expect(result).toBeLessThanOrEqual(1400);   // 1000 + 40%
   });
 
   it('should handle zero variance', () => {

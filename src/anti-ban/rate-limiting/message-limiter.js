@@ -7,6 +7,7 @@
 
 import { DailyPersistenceBase } from '../shared/persistence.js';
 import { humanDelay } from '../core/timing.js';
+import { config } from '../../config.js';
 
 /**
  * Rate limits based on account age:
@@ -35,29 +36,31 @@ export class MessageRateLimiter extends DailyPersistenceBase {
    * Get rate limits based on account age
    */
   getLimits(weeks = this.accountAgeWeeks) {
+    const { rateLimits } = config;
+
     if (weeks <= 1) {
       // New account - very conservative
       return {
-        hourly: 5,
-        daily: 15,
-        minIntervalMs: 180000,  // 3 minutes minimum
+        hourly: rateLimits.week1.hourly,
+        daily: rateLimits.week1.daily,
+        minIntervalMs: rateLimits.week1.intervalMs,
         description: 'New account (Week 1)'
       };
     }
     if (weeks <= 4) {
       // Warming account
       return {
-        hourly: 15,
-        daily: 40,
-        minIntervalMs: 90000,   // 90 seconds minimum
+        hourly: rateLimits.week2to4.hourly,
+        daily: rateLimits.week2to4.daily,
+        minIntervalMs: rateLimits.week2to4.intervalMs,
         description: 'Warming account (Week 2-4)'
       };
     }
     // Mature account
     return {
-      hourly: 30,
-      daily: 150,
-      minIntervalMs: 30000,    // 30 seconds minimum
+      hourly: rateLimits.mature.hourly,
+      daily: rateLimits.mature.daily,
+      minIntervalMs: rateLimits.mature.intervalMs,
       description: 'Mature account (Month 2+)'
     };
   }
@@ -71,20 +74,20 @@ export class MessageRateLimiter extends DailyPersistenceBase {
     const limits = this.getLimits();
 
     // Reset hourly counter
-    if (now - this.lastReset.hour > 3600000) {
+    if (now - this.lastReset.hour > config.rateLimits.hourlyResetMs) {
       this.hourlyCount = 0;
       this.lastReset.hour = now;
     }
 
     // Reset daily counter
-    if (now - this.lastReset.day > 86400000) {
+    if (now - this.lastReset.day > config.rateLimits.dailyResetMs) {
       this.dailyCount = 0;
       this.lastReset.day = now;
     }
 
     // Check hourly limit
     if (this.hourlyCount >= limits.hourly) {
-      const waitMs = 3600000 - (now - this.lastReset.hour);
+      const waitMs = config.rateLimits.hourlyResetMs - (now - this.lastReset.hour);
       return {
         allowed: false,
         reason: `Hourly limit reached (${limits.hourly}). Reset in ${Math.ceil(waitMs / 60000)} minutes.`,
@@ -94,7 +97,7 @@ export class MessageRateLimiter extends DailyPersistenceBase {
 
     // Check daily limit
     if (this.dailyCount >= limits.daily) {
-      const waitMs = 86400000 - (now - this.lastReset.day);
+      const waitMs = config.rateLimits.dailyResetMs - (now - this.lastReset.day);
       return {
         allowed: false,
         reason: `Daily limit reached (${limits.daily}). Reset in ${Math.ceil(waitMs / 3600000)} hours.`,
@@ -140,8 +143,8 @@ export class MessageRateLimiter extends DailyPersistenceBase {
       accountAgeWeeks: this.accountAgeWeeks,
       limitDescription: limits.description,
       lastMessageTime: this.lastMessageTime,
-      hourlyResetIn: Math.max(0, 3600000 - (Date.now() - this.lastReset.hour)),
-      dailyResetIn: Math.max(0, 86400000 - (Date.now() - this.lastReset.day)),
+      hourlyResetIn: Math.max(0, config.rateLimits.hourlyResetMs - (Date.now() - this.lastReset.hour)),
+      dailyResetIn: Math.max(0, config.rateLimits.dailyResetMs - (Date.now() - this.lastReset.day)),
     };
   }
 
@@ -177,7 +180,7 @@ export class MessageRateLimiter extends DailyPersistenceBase {
     this.lastReset.day = data.lastResetDay || Date.now();
 
     // Restore hourly if within the hour
-    if (data.lastResetHour && Date.now() - data.lastResetHour < 3600000) {
+    if (data.lastResetHour && Date.now() - data.lastResetHour < config.rateLimits.hourlyResetMs) {
       this.hourlyCount = data.hourlyCount || 0;
       this.lastReset.hour = data.lastResetHour;
     }
