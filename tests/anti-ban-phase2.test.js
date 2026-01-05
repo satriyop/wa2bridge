@@ -34,7 +34,7 @@ import {
   AutoResponder,
   MessageTemplates,
   ScheduledMessages,
-} from '../src/anti-ban.js';
+} from '../src/anti-ban/index.js';
 
 // =============================================================================
 // PHASE 2: MESSAGE SCHEDULER

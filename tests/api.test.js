@@ -81,7 +81,7 @@ describe('Phone Number Validation', () => {
       .send({ to: 'invalid-phone', message: 'Hello' });
 
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe('Invalid phone number format');
+    expect(res.body.error).toContain('Invalid phone number format');
   });
 
   it('should reject phone that is too short', async () => {
@@ -94,7 +94,7 @@ describe('Phone Number Validation', () => {
       .send({ to: '12345', message: 'Hello' });
 
     expect(res.status).toBe(400);
-    expect(res.body.error).toBe('Invalid phone number format');
+    expect(res.body.error).toContain('Invalid phone number format');
   });
 
   it('should reject phone with letters', async () => {
@@ -219,8 +219,8 @@ describe('Error Handlers', () => {
     const res = await request(app).get('/api/unknown-route');
 
     expect(res.status).toBe(404);
-    expect(res.body.error).toBe('Not found');
-    expect(res.body.message).toContain('/api/unknown-route');
+    expect(res.body.error).toContain('/api/unknown-route');
+    expect(res.body.code).toBe('NOT_FOUND');
   });
 
   it('should return 404 for unknown POST routes', async () => {
@@ -232,7 +232,8 @@ describe('Error Handlers', () => {
       .send({});
 
     expect(res.status).toBe(404);
-    expect(res.body.error).toBe('Not found');
+    expect(res.body.error).toContain('/api/does-not-exist');
+    expect(res.body.code).toBe('NOT_FOUND');
   });
 });
 

@@ -28,7 +28,7 @@ import {
   BanWarningSystem,
   MessageVariator,
   calculateReadDelay,
-} from '../src/anti-ban.js';
+} from '../src/anti-ban/index.js';
 
 // =============================================================================
 // HUMAN DELAY TESTS

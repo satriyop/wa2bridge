@@ -11,7 +11,7 @@
  * instead of just message forwarding.
  */
 
-import { WebhookManager } from './anti-ban.js';
+import { WebhookManager } from './anti-ban/index.js';
 
 /**
  * Webhook event types

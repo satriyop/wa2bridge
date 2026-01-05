@@ -2,6 +2,10 @@ import express from 'express';
 import crypto from 'crypto';
 import QRCode from 'qrcode';
 import { setupSwagger } from './swagger.js';
+import { wrapHandler, wrapCustomHandler } from './middleware/handler.js';
+import { errorHandler, notFoundHandler } from './middleware/errors.js';
+import { ValidationError } from './errors.js';
+import { LRUMap } from './utils/lru-map.js';
 
 /**
  * @typedef {import('../types/index.js').SendMessageRequest} SendMessageRequest
@@ -86,7 +90,7 @@ export function createApiServer(whatsappClient, options = {}) {
   // ==========================================================================
   // IP-based Rate Limiting
   // ==========================================================================
-  const ipRateLimits = new Map();
+  const ipRateLimits = new LRUMap(1000); // Max 1000 IPs tracked
   const IP_RATE_LIMIT = 100;        // requests per window
   const IP_RATE_WINDOW = 60 * 1000; // 1 minute window
 
@@ -331,58 +335,43 @@ export function createApiServer(whatsappClient, options = {}) {
    * @param {SendMessageRequest} req.body - Message details
    * @returns {SendMessageResponse} Send result
    */
-  app.post('/api/send', authenticate, async (req, res) => {
-    try {
-      /** @type {SendMessageRequest} */
-      const { to, message, reply_to } = req.body;
+  app.post('/api/send', authenticate, wrapHandler(async (req) => {
+    /** @type {SendMessageRequest} */
+    const { to, message, reply_to } = req.body;
 
-      if (!to || !message) {
-        return res.status(400).json({ error: 'Missing "to" or "message"' });
-      }
-
-      // Validate phone number format
-      // Accepts: +6281234567890, 6281234567890, 6281234567890@s.whatsapp.net
-      const phoneRegex = /^\+?\d{10,15}(@s\.whatsapp\.net)?$/;
-      const cleanPhone = to.replace(/[\s-]/g, ''); // Remove spaces and dashes
-      if (!phoneRegex.test(cleanPhone)) {
-        return res.status(400).json({
-          error: 'Invalid phone number format',
-          message: 'Use format: +6281234567890 or 6281234567890',
-        });
-      }
-
-      const result = await whatsappClient.sendMessage(to, message, reply_to);
-
-      res.json({
-        success: true,
-        messageId: result.key.id,
-        to,
-      });
-    } catch (error) {
-      console.error('Send error:', error);
-      res.status(500).json({
-        success: false,
-        error: error.message,
-      });
+    if (!to || !message) {
+      throw new ValidationError('Missing "to" or "message"');
     }
-  });
+
+    // Validate phone number format
+    // Accepts: +6281234567890, 6281234567890, 6281234567890@s.whatsapp.net
+    const phoneRegex = /^\+?\d{10,15}(@s\.whatsapp\.net)?$/;
+    const cleanPhone = to.replace(/[\s-]/g, ''); // Remove spaces and dashes
+    if (!phoneRegex.test(cleanPhone)) {
+      throw new ValidationError('Invalid phone number format. Use format: +6281234567890 or 6281234567890');
+    }
+
+    const result = await whatsappClient.sendMessage(to, message, reply_to);
+
+    return {
+      success: true,
+      messageId: result.key.id,
+      to,
+    };
+  }));
 
   // Reconnect (logout and reconnect)
-  app.post('/api/reconnect', authenticate, async (req, res) => {
-    try {
-      await whatsappClient.disconnect();
+  app.post('/api/reconnect', authenticate, wrapHandler(async () => {
+    await whatsappClient.disconnect();
 
-      // Use humanized delay for reconnection (2-4 seconds with jitter)
-      const { humanDelay } = await import('./anti-ban.js');
-      const reconnectDelay = humanDelay(3000, 0.4);
+    // Use humanized delay for reconnection (2-4 seconds with jitter)
+    const { humanDelay } = await import('./anti-ban/index.js');
+    const reconnectDelay = humanDelay(3000, 0.4);
 
-      setTimeout(() => whatsappClient.connect(), reconnectDelay);
+    setTimeout(() => whatsappClient.connect(), reconnectDelay);
 
-      res.json({ status: 'reconnecting', delayMs: reconnectDelay });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+    return { status: 'reconnecting', delayMs: reconnectDelay };
+  }));
 
   // Get rate limit status
   app.get('/api/rate-limits', authenticate, (req, res) => {
@@ -395,25 +384,18 @@ export function createApiServer(whatsappClient, options = {}) {
   });
 
   // Set account age (for adjusting rate limits)
-  app.post('/api/account-age', authenticate, (req, res) => {
-    try {
-      const { weeks } = req.body;
-
-      if (typeof weeks !== 'number' || weeks < 1) {
-        return res.status(400).json({ error: 'weeks must be a positive number' });
-      }
-
-      whatsappClient.setAccountAge(weeks);
-
-      res.json({
-        success: true,
-        accountAgeWeeks: weeks,
-        newLimits: whatsappClient.rateLimiter.getLimits(),
-      });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+  app.post('/api/account-age', authenticate, wrapHandler((req) => {
+    const { weeks } = req.body;
+    if (typeof weeks !== 'number' || weeks < 1) {
+      throw new ValidationError('weeks must be a positive number');
     }
-  });
+    whatsappClient.setAccountAge(weeks);
+    return {
+      success: true,
+      accountAgeWeeks: weeks,
+      newLimits: whatsappClient.rateLimiter.getLimits(),
+    };
+  }));
 
   // Get ban warning status
   app.get('/api/ban-warning', authenticate, (req, res) => {
@@ -425,901 +407,597 @@ export function createApiServer(whatsappClient, options = {}) {
   });
 
   // Exit hibernation mode (manual override)
-  app.post('/api/exit-hibernation', authenticate, (req, res) => {
-    try {
-      whatsappClient.exitHibernation();
-      res.json({
-        success: true,
-        message: 'Hibernation mode disabled. Proceed with caution.',
-        banWarning: whatsappClient.banWarning.getMetrics(),
-      });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.post('/api/exit-hibernation', authenticate, wrapHandler(() => {
+    whatsappClient.exitHibernation();
+    return {
+      success: true,
+      message: 'Hibernation mode disabled. Proceed with caution.',
+      banWarning: whatsappClient.banWarning.getMetrics(),
+    };
+  }));
 
   // Reset ban warning metrics
-  app.post('/api/reset-ban-warning', authenticate, (req, res) => {
-    try {
-      whatsappClient.resetBanWarning();
-      res.json({
-        success: true,
-        message: 'Ban warning metrics reset',
-        banWarning: whatsappClient.banWarning.getMetrics(),
-      });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.post('/api/reset-ban-warning', authenticate, wrapHandler(() => {
+    whatsappClient.resetBanWarning();
+    return {
+      success: true,
+      message: 'Ban warning metrics reset',
+      banWarning: whatsappClient.banWarning.getMetrics(),
+    };
+  }));
 
   // Manually set presence (online/offline)
-  app.post('/api/presence', authenticate, async (req, res) => {
-    try {
-      const { status } = req.body;
-
-      if (!['online', 'offline'].includes(status)) {
-        return res.status(400).json({ error: 'status must be "online" or "offline"' });
-      }
-
-      if (status === 'online') {
-        await whatsappClient.presenceManager.goOnline();
-      } else {
-        await whatsappClient.presenceManager.goOffline();
-      }
-
-      res.json({
-        success: true,
-        presence: whatsappClient.presenceManager.getStatus(),
-      });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+  app.post('/api/presence', authenticate, wrapHandler(async (req) => {
+    const { status } = req.body;
+    if (!['online', 'offline'].includes(status)) {
+      throw new ValidationError('status must be "online" or "offline"');
     }
-  });
+
+    if (status === 'online') {
+      await whatsappClient.presenceManager.goOnline();
+    } else {
+      await whatsappClient.presenceManager.goOffline();
+    }
+
+    return {
+      success: true,
+      presence: whatsappClient.presenceManager.getStatus(),
+    };
+  }));
 
   // ==========================================================================
   // PHASE 2: NEW ANTI-BAN ENDPOINTS
   // ==========================================================================
 
   // Get delivery health status
-  app.get('/api/delivery-health', authenticate, (req, res) => {
-    try {
-      const health = whatsappClient.deliveryTracker.checkDeliveryHealth();
-      res.json(health);
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/delivery-health', authenticate, wrapHandler(() => {
+    return whatsappClient.deliveryTracker.checkDeliveryHealth();
+  }));
 
   // Get contact warmup status
-  app.get('/api/contact-warmup/:phone', authenticate, (req, res) => {
-    try {
-      const { phone } = req.params;
-      const status = whatsappClient.contactWarmup.getContactStatus(phone);
-      const canMessage = whatsappClient.contactWarmup.canMessage(phone);
-      res.json({ ...status, ...canMessage });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/contact-warmup/:phone', authenticate, wrapHandler((req) => {
+    const { phone } = req.params;
+    const status = whatsappClient.contactWarmup.getContactStatus(phone);
+    const canMessage = whatsappClient.contactWarmup.canMessage(phone);
+    return { ...status, ...canMessage };
+  }));
 
   // Queue a message for optimal timing (alternative to /api/send)
-  app.post('/api/queue', authenticate, async (req, res) => {
-    try {
-      const { to, message, reply_to, priority } = req.body;
-
-      if (!to || !message) {
-        return res.status(400).json({ error: 'Missing "to" or "message"' });
-      }
-
-      const messageId = whatsappClient.queueMessage(to, message, reply_to, priority || 'normal');
-      const queueStatus = whatsappClient.messageScheduler.getStatus();
-
-      res.json({
-        success: true,
-        queued: true,
-        queuedMessageId: messageId,
-        queueStatus,
-      });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+  app.post('/api/queue', authenticate, wrapHandler((req) => {
+    const { to, message, reply_to, priority } = req.body;
+    if (!to || !message) {
+      throw new ValidationError('Missing "to" or "message"');
     }
-  });
+    const messageId = whatsappClient.queueMessage(to, message, reply_to, priority || 'normal');
+    const queueStatus = whatsappClient.messageScheduler.getStatus();
+    return { success: true, queued: true, queuedMessageId: messageId, queueStatus };
+  }));
 
   // Get weekend/holiday pattern status
-  app.get('/api/weekend-patterns', authenticate, (req, res) => {
-    try {
-      res.json(whatsappClient.weekendPatterns.getStatus());
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/weekend-patterns', authenticate, wrapHandler(() => {
+    return whatsappClient.weekendPatterns.getStatus();
+  }));
 
   // Get activity ramp status (post-downtime)
-  app.get('/api/activity-ramp', authenticate, (req, res) => {
-    try {
-      res.json(whatsappClient.activityRamper.getStatus());
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/activity-ramp', authenticate, wrapHandler(() => {
+    return whatsappClient.activityRamper.getStatus();
+  }));
 
   // Get network fingerprint health
-  app.get('/api/network-health', authenticate, (req, res) => {
-    try {
-      const health = whatsappClient.networkFingerprint.checkNetworkHealth();
-      const recommendations = whatsappClient.networkFingerprint.getRecommendations();
-      res.json({ ...health, recommendations });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/network-health', authenticate, wrapHandler(() => {
+    const health = whatsappClient.networkFingerprint.checkNetworkHealth();
+    const recommendations = whatsappClient.networkFingerprint.getRecommendations();
+    return { ...health, recommendations };
+  }));
 
   // Get message queue status
-  app.get('/api/queue-status', authenticate, (req, res) => {
-    try {
-      res.json(whatsappClient.messageScheduler.getStatus());
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/queue-status', authenticate, wrapHandler(() => {
+    return whatsappClient.messageScheduler.getStatus();
+  }));
 
   // Clear message queue
-  app.post('/api/queue-clear', authenticate, (req, res) => {
-    try {
-      whatsappClient.messageScheduler.clear();
-      res.json({
-        success: true,
-        message: 'Message queue cleared',
-        queueStatus: whatsappClient.messageScheduler.getStatus(),
-      });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.post('/api/queue-clear', authenticate, wrapHandler(() => {
+    whatsappClient.messageScheduler.clear();
+    return {
+      success: true,
+      message: 'Message queue cleared',
+      queueStatus: whatsappClient.messageScheduler.getStatus(),
+    };
+  }));
 
   // ==========================================================================
   // PHASE 3: ADDITIONAL ANTI-BAN ENDPOINTS
   // ==========================================================================
 
   // Get spam detection status
-  app.get('/api/spam-detection', authenticate, (req, res) => {
-    try {
-      res.json(whatsappClient.spamDetector.getMetrics());
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/spam-detection', authenticate, wrapHandler(() => {
+    return whatsappClient.spamDetector.getMetrics();
+  }));
 
   // Get geo IP match status
-  app.get('/api/geo-match', authenticate, async (req, res) => {
-    try {
-      const status = whatsappClient.geoMatcher.getStatus();
-      const check = await whatsappClient.geoMatcher.checkIPCountry();
-      res.json({ ...status, check });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/geo-match', authenticate, wrapHandler(async () => {
+    const status = whatsappClient.geoMatcher.getStatus();
+    const check = await whatsappClient.geoMatcher.checkIPCountry();
+    return { ...status, check };
+  }));
 
   // Get conversation context for a contact
-  app.get('/api/conversation/:phone', authenticate, (req, res) => {
-    try {
-      const { phone } = req.params;
-      const context = whatsappClient.conversationMemory.getContext(phone);
-      res.json(context);
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/conversation/:phone', authenticate, wrapHandler((req) => {
+    const { phone } = req.params;
+    return whatsappClient.conversationMemory.getContext(phone);
+  }));
 
   // Get all active conversations
-  app.get('/api/conversations-active', authenticate, (req, res) => {
-    try {
-      const active = whatsappClient.conversationMemory.getActiveConversations();
-      res.json({ count: active.length, conversations: active });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/conversations-active', authenticate, wrapHandler(() => {
+    const active = whatsappClient.conversationMemory.getActiveConversations();
+    return { count: active.length, conversations: active };
+  }));
 
   // Get status viewer status
-  app.get('/api/status-viewer', authenticate, (req, res) => {
-    try {
-      res.json(whatsappClient.statusViewer.getStatus());
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/status-viewer', authenticate, wrapHandler(() => {
+    return whatsappClient.statusViewer.getStatus();
+  }));
 
   // Check reply probability for a message
-  app.post('/api/reply-check', authenticate, (req, res) => {
-    try {
-      const { text, from } = req.body;
-      if (!text || !from) {
-        return res.status(400).json({ error: 'Missing "text" or "from"' });
-      }
-      const check = whatsappClient.replyProbability.shouldReply({ text, from });
-      res.json(check);
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+  app.post('/api/reply-check', authenticate, wrapHandler((req) => {
+    const { text, from } = req.body;
+    if (!text || !from) {
+      throw new ValidationError('Missing "text" or "from"');
     }
-  });
+    return whatsappClient.replyProbability.shouldReply({ text, from });
+  }));
 
   // ==========================================================================
   // PHASE 4: DETECTION & RECOVERY / OPERATIONAL ENDPOINTS
   // ==========================================================================
 
   // Get block detection status
-  app.get('/api/block-detection', authenticate, (req, res) => {
-    try {
-      res.json(whatsappClient.blockDetector.getStats());
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/block-detection', authenticate, wrapHandler(() => {
+    return whatsappClient.blockDetector.getStats();
+  }));
 
   // Check if a specific contact has blocked us
-  app.get('/api/block-detection/:phone', authenticate, async (req, res) => {
-    try {
-      const { phone } = req.params;
-      const isBlocked = await whatsappClient.blockDetector.checkIfBlocked(phone);
-      const status = whatsappClient.blockDetector.getContactStatus(phone);
-      res.json({ phone, isBlocked, ...status });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/block-detection/:phone', authenticate, wrapHandler(async (req) => {
+    const { phone } = req.params;
+    const isBlocked = await whatsappClient.blockDetector.checkIfBlocked(phone);
+    const status = whatsappClient.blockDetector.getContactStatus(phone);
+    return { phone, isBlocked, ...status };
+  }));
 
   // Get session backup info
-  app.get('/api/session-backup', authenticate, (req, res) => {
-    try {
-      res.json(whatsappClient.sessionManager.getBackupInfo());
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/session-backup', authenticate, wrapHandler(() => {
+    return whatsappClient.sessionManager.getBackupInfo();
+  }));
 
   // Trigger manual session backup
-  app.post('/api/session-backup', authenticate, async (req, res) => {
-    try {
-      const backupPath = await whatsappClient.sessionManager.backup();
-      res.json({
-        success: true,
-        message: 'Session backed up',
-        backupPath,
-        backupInfo: whatsappClient.sessionManager.getBackupInfo(),
-      });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.post('/api/session-backup', authenticate, wrapHandler(async () => {
+    const backupPath = await whatsappClient.sessionManager.backup();
+    return {
+      success: true,
+      message: 'Session backed up',
+      backupPath,
+      backupInfo: whatsappClient.sessionManager.getBackupInfo(),
+    };
+  }));
 
   // Restore session from backup
-  app.post('/api/session-restore', authenticate, async (req, res) => {
-    try {
-      const { backupName } = req.body;
-      const restored = await whatsappClient.sessionManager.restore(backupName);
-      res.json({
-        success: restored,
-        message: restored ? 'Session restored - restart required' : 'Restore failed',
-      });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.post('/api/session-restore', authenticate, wrapHandler(async (req) => {
+    const { backupName } = req.body;
+    const restored = await whatsappClient.sessionManager.restore(backupName);
+    return {
+      success: restored,
+      message: restored ? 'Session restored - restart required' : 'Restore failed',
+    };
+  }));
 
   // Get persistent queue status
-  app.get('/api/persistent-queue', authenticate, (req, res) => {
-    try {
-      res.json(whatsappClient.persistentQueue.getStats());
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/persistent-queue', authenticate, wrapHandler(() => {
+    return whatsappClient.persistentQueue.getStats();
+  }));
 
   // Queue a message to persistent queue (survives restart)
-  app.post('/api/persistent-queue', authenticate, (req, res) => {
-    try {
-      const { to, message, reply_to, priority } = req.body;
-
-      if (!to || !message) {
-        return res.status(400).json({ error: 'Missing "to" or "message"' });
-      }
-
-      const messageId = whatsappClient.persistentQueue.enqueue(to, message, reply_to, priority || 'normal');
-      res.json({
-        success: true,
-        queued: true,
-        queuedMessageId: messageId,
-        queueStats: whatsappClient.persistentQueue.getStats(),
-      });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+  app.post('/api/persistent-queue', authenticate, wrapHandler((req) => {
+    const { to, message, reply_to, priority } = req.body;
+    if (!to || !message) {
+      throw new ValidationError('Missing "to" or "message"');
     }
-  });
+    const messageId = whatsappClient.persistentQueue.enqueue(to, message, reply_to, priority || 'normal');
+    return {
+      success: true,
+      queued: true,
+      queuedMessageId: messageId,
+      queueStats: whatsappClient.persistentQueue.getStats(),
+    };
+  }));
 
   // Process persistent queue manually
-  app.post('/api/persistent-queue/process', authenticate, async (req, res) => {
-    try {
-      await whatsappClient.persistentQueue.processQueue();
-      res.json({
-        success: true,
-        queueStats: whatsappClient.persistentQueue.getStats(),
-      });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.post('/api/persistent-queue/process', authenticate, wrapHandler(async () => {
+    await whatsappClient.persistentQueue.processQueue();
+    return { success: true, queueStats: whatsappClient.persistentQueue.getStats() };
+  }));
 
   // Get webhook retry queue status
-  app.get('/api/webhook-retry', authenticate, (req, res) => {
-    try {
-      res.json(whatsappClient.webhookManager.getStats());
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/webhook-retry', authenticate, wrapHandler(() => {
+    return whatsappClient.webhookManager.getStats();
+  }));
 
   // Retry all failed webhooks
-  app.post('/api/webhook-retry', authenticate, async (req, res) => {
-    try {
-      await whatsappClient.webhookManager.retryFailed();
-      res.json({
-        success: true,
-        webhookStats: whatsappClient.webhookManager.getStats(),
-      });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.post('/api/webhook-retry', authenticate, wrapHandler(async () => {
+    await whatsappClient.webhookManager.retryFailed();
+    return { success: true, webhookStats: whatsappClient.webhookManager.getStats() };
+  }));
 
   // Get health monitor status
-  app.get('/api/health-monitor', authenticate, (req, res) => {
-    try {
-      res.json(whatsappClient.healthMonitor.getStatus());
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/health-monitor', authenticate, wrapHandler(() => {
+    return whatsappClient.healthMonitor.getStatus();
+  }));
 
   // Get full health report
-  app.get('/api/health-report', authenticate, (req, res) => {
-    try {
-      const report = whatsappClient.healthMonitor.generateReport();
-      res.json(report);
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/health-report', authenticate, wrapHandler(() => {
+    return whatsappClient.healthMonitor.generateReport();
+  }));
 
   // Get detected language for a contact
-  app.get('/api/language/:phone', authenticate, (req, res) => {
-    try {
-      const { phone } = req.params;
-      const language = whatsappClient.languageDetector.getContactLanguage(phone);
-      const confidence = whatsappClient.languageDetector.getLanguageConfidence(phone);
-      res.json({ phone, language, confidence });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/language/:phone', authenticate, wrapHandler((req) => {
+    const { phone } = req.params;
+    const language = whatsappClient.languageDetector.getContactLanguage(phone);
+    const confidence = whatsappClient.languageDetector.getLanguageConfidence(phone);
+    return { phone, language, confidence };
+  }));
 
   // Get all detected languages
-  app.get('/api/languages', authenticate, (req, res) => {
-    try {
-      res.json(whatsappClient.languageDetector.getAllLanguages());
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/languages', authenticate, wrapHandler(() => {
+    return whatsappClient.languageDetector.getAllLanguages();
+  }));
 
   // ==========================================================================
   // PHASE 5A: ANALYTICS & INTELLIGENCE ENDPOINTS
   // ==========================================================================
 
   // Get analytics summary
-  app.get('/api/analytics', authenticate, (req, res) => {
-    try {
-      res.json(whatsappClient.analytics.getSummary());
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/analytics', authenticate, wrapHandler(() => {
+    return whatsappClient.analytics.getSummary();
+  }));
 
   // Get analytics for specific contact
-  app.get('/api/analytics/:phone', authenticate, (req, res) => {
-    try {
-      const { phone } = req.params;
-      const stats = whatsappClient.analytics.getContactStats(phone);
-      res.json(stats || { error: 'Contact not found' });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/analytics/:phone', authenticate, wrapHandler((req) => {
+    const { phone } = req.params;
+    const stats = whatsappClient.analytics.getContactStats(phone);
+    return stats || { error: 'Contact not found' };
+  }));
 
   // Get peak messaging hours
-  app.get('/api/analytics/peak-hours', authenticate, (req, res) => {
-    try {
-      res.json(whatsappClient.analytics.getPeakHours());
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/analytics/peak-hours', authenticate, wrapHandler(() => {
+    return whatsappClient.analytics.getPeakHours();
+  }));
 
   // Get contact scoring stats
-  app.get('/api/scoring', authenticate, (req, res) => {
-    try {
-      res.json(whatsappClient.contactScoring.getStats());
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/scoring', authenticate, wrapHandler(() => {
+    return whatsappClient.contactScoring.getStats();
+  }));
 
   // Get score for specific contact
-  app.get('/api/scoring/:phone', authenticate, (req, res) => {
-    try {
-      const { phone } = req.params;
-      const score = whatsappClient.contactScoring.getScore(phone);
-      const tier = whatsappClient.contactScoring.getTier(phone);
-      res.json({ phone, score, tier });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/scoring/:phone', authenticate, wrapHandler((req) => {
+    const { phone } = req.params;
+    const score = whatsappClient.contactScoring.getScore(phone);
+    const tier = whatsappClient.contactScoring.getTier(phone);
+    return { phone, score, tier };
+  }));
 
   // Get top contacts by score
-  app.get('/api/scoring/top/:limit', authenticate, (req, res) => {
-    try {
-      const limit = parseInt(req.params.limit) || 10;
-      res.json(whatsappClient.contactScoring.getTopContacts(limit));
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/scoring/top/:limit', authenticate, wrapHandler((req) => {
+    const limit = parseInt(req.params.limit) || 10;
+    return whatsappClient.contactScoring.getTopContacts(limit);
+  }));
 
   // Get contacts needing attention
-  app.get('/api/scoring/attention', authenticate, (req, res) => {
-    try {
-      res.json(whatsappClient.contactScoring.getContactsNeedingAttention());
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/scoring/attention', authenticate, wrapHandler(() => {
+    return whatsappClient.contactScoring.getContactsNeedingAttention();
+  }));
 
   // Analyze sentiment of text
-  app.post('/api/sentiment/analyze', authenticate, (req, res) => {
-    try {
-      const { text } = req.body;
-      if (!text) return res.status(400).json({ error: 'Missing "text"' });
-      res.json(whatsappClient.sentimentDetector.analyze(text));
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.post('/api/sentiment/analyze', authenticate, wrapHandler((req) => {
+    const { text } = req.body;
+    if (!text) throw new ValidationError('Missing "text"');
+    return whatsappClient.sentimentDetector.analyze(text);
+  }));
 
   // Get sentiment for contact
-  app.get('/api/sentiment/:phone', authenticate, (req, res) => {
-    try {
-      const { phone } = req.params;
-      res.json(whatsappClient.sentimentDetector.getContactSentiment(phone));
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/sentiment/:phone', authenticate, wrapHandler((req) => {
+    const { phone } = req.params;
+    return whatsappClient.sentimentDetector.getContactSentiment(phone);
+  }));
 
   // ==========================================================================
   // PHASE 5B: SECURITY HARDENING ENDPOINTS
   // ==========================================================================
 
   // Get IP whitelist status
-  app.get('/api/security/ip-whitelist', authenticate, (req, res) => {
-    try {
-      res.json(whatsappClient.ipWhitelist.getStatus());
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/security/ip-whitelist', authenticate, wrapHandler(() => {
+    return whatsappClient.ipWhitelist.getStatus();
+  }));
 
   // Enable/disable IP whitelist
-  app.post('/api/security/ip-whitelist/toggle', authenticate, (req, res) => {
-    try {
-      const { enabled } = req.body;
-      whatsappClient.ipWhitelist.setEnabled(enabled);
-      res.json({ success: true, status: whatsappClient.ipWhitelist.getStatus() });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.post('/api/security/ip-whitelist/toggle', authenticate, wrapHandler((req) => {
+    const { enabled } = req.body;
+    whatsappClient.ipWhitelist.setEnabled(enabled);
+    return { success: true, status: whatsappClient.ipWhitelist.getStatus() };
+  }));
 
   // Add IP to whitelist
-  app.post('/api/security/ip-whitelist/add', authenticate, (req, res) => {
-    try {
-      const { ip } = req.body;
-      if (!ip) return res.status(400).json({ error: 'Missing "ip"' });
-      whatsappClient.ipWhitelist.addToWhitelist(ip);
-      res.json({ success: true, status: whatsappClient.ipWhitelist.getStatus() });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.post('/api/security/ip-whitelist/add', authenticate, wrapHandler((req) => {
+    const { ip } = req.body;
+    if (!ip) throw new ValidationError('Missing "ip"');
+    whatsappClient.ipWhitelist.addToWhitelist(ip);
+    return { success: true, status: whatsappClient.ipWhitelist.getStatus() };
+  }));
 
   // Add IP to blacklist
-  app.post('/api/security/ip-blacklist/add', authenticate, (req, res) => {
-    try {
-      const { ip } = req.body;
-      if (!ip) return res.status(400).json({ error: 'Missing "ip"' });
-      whatsappClient.ipWhitelist.addToBlacklist(ip);
-      res.json({ success: true, status: whatsappClient.ipWhitelist.getStatus() });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.post('/api/security/ip-blacklist/add', authenticate, wrapHandler((req) => {
+    const { ip } = req.body;
+    if (!ip) throw new ValidationError('Missing "ip"');
+    whatsappClient.ipWhitelist.addToBlacklist(ip);
+    return { success: true, status: whatsappClient.ipWhitelist.getStatus() };
+  }));
 
   // Get audit logs
-  app.get('/api/security/audit-logs', authenticate, (req, res) => {
-    try {
-      const { type, limit, hours } = req.query;
-      const filter = {};
-      if (type) filter.type = type;
-      if (limit) filter.limit = parseInt(limit);
-      if (hours) filter.since = Date.now() - parseInt(hours) * 60 * 60 * 1000;
-      res.json(whatsappClient.auditLogger.getLogs(filter));
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/security/audit-logs', authenticate, wrapHandler((req) => {
+    const { type, limit, hours } = req.query;
+    const filter = {};
+    if (type) filter.type = type;
+    if (limit) filter.limit = parseInt(limit);
+    if (hours) filter.since = Date.now() - parseInt(hours) * 60 * 60 * 1000;
+    return whatsappClient.auditLogger.getLogs(filter);
+  }));
 
   // Get audit log stats
-  app.get('/api/security/audit-stats', authenticate, (req, res) => {
-    try {
-      const hours = parseInt(req.query.hours) || 24;
-      res.json(whatsappClient.auditLogger.getStats(hours));
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/security/audit-stats', authenticate, wrapHandler((req) => {
+    const hours = parseInt(req.query.hours) || 24;
+    return whatsappClient.auditLogger.getStats(hours);
+  }));
 
   // Get security events
-  app.get('/api/security/events', authenticate, (req, res) => {
-    try {
-      const hours = parseInt(req.query.hours) || 24;
-      res.json(whatsappClient.auditLogger.getSecurityEvents(hours));
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/security/events', authenticate, wrapHandler((req) => {
+    const hours = parseInt(req.query.hours) || 24;
+    return whatsappClient.auditLogger.getSecurityEvents(hours);
+  }));
 
   // Get API rate limiter stats
-  app.get('/api/security/rate-limiter', authenticate, (req, res) => {
-    try {
-      res.json(whatsappClient.apiRateLimiter.getStats());
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/security/rate-limiter', authenticate, wrapHandler(() => {
+    return whatsappClient.apiRateLimiter.getStats();
+  }));
 
   // ==========================================================================
   // PHASE 5C: SMART AUTOMATION ENDPOINTS
   // ==========================================================================
 
   // Get auto-responder status
-  app.get('/api/auto-responder', authenticate, (req, res) => {
-    try {
-      res.json({
-        stats: whatsappClient.autoResponder.getStats(),
-        rules: whatsappClient.autoResponder.getRules(),
-      });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/auto-responder', authenticate, wrapHandler(() => {
+    return {
+      stats: whatsappClient.autoResponder.getStats(),
+      rules: whatsappClient.autoResponder.getRules(),
+    };
+  }));
 
   // Enable/disable auto-responder
-  app.post('/api/auto-responder/toggle', authenticate, (req, res) => {
-    try {
-      const { enabled } = req.body;
-      whatsappClient.autoResponder.setEnabled(enabled);
-      res.json({ success: true, enabled });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.post('/api/auto-responder/toggle', authenticate, wrapHandler((req) => {
+    const { enabled } = req.body;
+    whatsappClient.autoResponder.setEnabled(enabled);
+    return { success: true, enabled };
+  }));
 
   // Add auto-responder rule
-  app.post('/api/auto-responder/rules', authenticate, (req, res) => {
-    try {
-      const rule = whatsappClient.autoResponder.addRule(req.body);
-      res.json({ success: true, rule });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.post('/api/auto-responder/rules', authenticate, wrapHandler((req) => {
+    const rule = whatsappClient.autoResponder.addRule(req.body);
+    return { success: true, rule };
+  }));
 
   // Update auto-responder rule
-  app.put('/api/auto-responder/rules/:id', authenticate, (req, res) => {
-    try {
-      const { id } = req.params;
-      const rule = whatsappClient.autoResponder.updateRule(id, req.body);
-      res.json({ success: true, rule });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.put('/api/auto-responder/rules/:id', authenticate, wrapHandler((req) => {
+    const { id } = req.params;
+    const rule = whatsappClient.autoResponder.updateRule(id, req.body);
+    return { success: true, rule };
+  }));
 
   // Delete auto-responder rule
-  app.delete('/api/auto-responder/rules/:id', authenticate, (req, res) => {
-    try {
-      const { id } = req.params;
-      const deleted = whatsappClient.autoResponder.deleteRule(id);
-      res.json({ success: deleted });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.delete('/api/auto-responder/rules/:id', authenticate, wrapHandler((req) => {
+    const { id } = req.params;
+    const deleted = whatsappClient.autoResponder.deleteRule(id);
+    return { success: deleted };
+  }));
 
   // Get message templates
-  app.get('/api/templates', authenticate, (req, res) => {
-    try {
-      const { category } = req.query;
-      res.json(whatsappClient.messageTemplates.list(category));
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/templates', authenticate, wrapHandler((req) => {
+    const { category } = req.query;
+    return whatsappClient.messageTemplates.list(category);
+  }));
 
   // Create message template
-  app.post('/api/templates', authenticate, (req, res) => {
-    try {
-      const { name, content, category, language } = req.body;
-      if (!name || !content) {
-        return res.status(400).json({ error: 'Missing "name" or "content"' });
-      }
-      const template = whatsappClient.messageTemplates.create(name, content, { category, language });
-      res.json({ success: true, template });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+  app.post('/api/templates', authenticate, wrapHandler((req) => {
+    const { name, content, category, language } = req.body;
+    if (!name || !content) {
+      throw new ValidationError('Missing "name" or "content"');
     }
-  });
+    const template = whatsappClient.messageTemplates.create(name, content, { category, language });
+    return { success: true, template };
+  }));
 
   // Render message template
-  app.post('/api/templates/render', authenticate, (req, res) => {
-    try {
-      const { name, variables } = req.body;
-      if (!name) return res.status(400).json({ error: 'Missing "name"' });
-      const rendered = whatsappClient.messageTemplates.render(name, variables || {});
-      res.json({ success: true, rendered });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.post('/api/templates/render', authenticate, wrapHandler((req) => {
+    const { name, variables } = req.body;
+    if (!name) throw new ValidationError('Missing "name"');
+    const rendered = whatsappClient.messageTemplates.render(name, variables || {});
+    return { success: true, rendered };
+  }));
 
   // Delete message template
-  app.delete('/api/templates/:name', authenticate, (req, res) => {
-    try {
-      const { name } = req.params;
-      const deleted = whatsappClient.messageTemplates.delete(name);
-      res.json({ success: deleted });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.delete('/api/templates/:name', authenticate, wrapHandler((req) => {
+    const { name } = req.params;
+    const deleted = whatsappClient.messageTemplates.delete(name);
+    return { success: deleted };
+  }));
 
   // Get scheduled messages
-  app.get('/api/scheduled', authenticate, (req, res) => {
-    try {
-      const { status, to } = req.query;
-      res.json(whatsappClient.scheduledMessages.getScheduled({ status, to }));
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/scheduled', authenticate, wrapHandler((req) => {
+    const { status, to } = req.query;
+    return whatsappClient.scheduledMessages.getScheduled({ status, to });
+  }));
 
   // Schedule a message
-  app.post('/api/scheduled', authenticate, (req, res) => {
-    try {
-      const { to, message, sendAt, replyTo, repeat } = req.body;
-      if (!to || !message || !sendAt) {
-        return res.status(400).json({ error: 'Missing "to", "message", or "sendAt"' });
-      }
-      const scheduled = whatsappClient.scheduledMessages.schedule(to, message, sendAt, { replyTo, repeat });
-      res.json({ success: true, scheduled });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+  app.post('/api/scheduled', authenticate, wrapHandler((req) => {
+    const { to, message, sendAt, replyTo, repeat } = req.body;
+    if (!to || !message || !sendAt) {
+      throw new ValidationError('Missing "to", "message", or "sendAt"');
     }
-  });
+    const scheduled = whatsappClient.scheduledMessages.schedule(to, message, sendAt, { replyTo, repeat });
+    return { success: true, scheduled };
+  }));
 
   // Cancel scheduled message
-  app.delete('/api/scheduled/:id', authenticate, (req, res) => {
-    try {
-      const { id } = req.params;
-      const cancelled = whatsappClient.scheduledMessages.cancel(id);
-      res.json({ success: cancelled });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.delete('/api/scheduled/:id', authenticate, wrapHandler((req) => {
+    const { id } = req.params;
+    const cancelled = whatsappClient.scheduledMessages.cancel(id);
+    return { success: cancelled };
+  }));
 
   // Get scheduled messages stats
-  app.get('/api/scheduled/stats', authenticate, (req, res) => {
-    try {
-      res.json(whatsappClient.scheduledMessages.getStats());
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/scheduled/stats', authenticate, wrapHandler(() => {
+    return whatsappClient.scheduledMessages.getStats();
+  }));
 
   // ==========================================================================
   // PHASE 6: ENHANCED WEBHOOK ENDPOINTS
   // ==========================================================================
 
   // Get webhook status and subscriptions
-  app.get('/api/webhooks', authenticate, (req, res) => {
-    try {
-      if (!whatsappClient.webhookEmitter) {
-        return res.json({ enabled: false, message: 'Webhook emitter not initialized' });
-      }
-      res.json(whatsappClient.webhookEmitter.getStats());
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+  app.get('/api/webhooks', authenticate, wrapHandler(() => {
+    if (!whatsappClient.webhookEmitter) {
+      return { enabled: false, message: 'Webhook emitter not initialized' };
     }
-  });
+    return whatsappClient.webhookEmitter.getStats();
+  }));
 
   // Get webhook event history
-  app.get('/api/webhooks/history', authenticate, (req, res) => {
-    try {
-      const limit = parseInt(req.query.limit) || 20;
-      if (!whatsappClient.webhookEmitter) {
-        return res.json({ events: [] });
-      }
-      res.json({ events: whatsappClient.webhookEmitter.getHistory(limit) });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+  app.get('/api/webhooks/history', authenticate, wrapHandler((req) => {
+    const limit = parseInt(req.query.limit) || 20;
+    if (!whatsappClient.webhookEmitter) {
+      return { events: [] };
     }
-  });
+    return { events: whatsappClient.webhookEmitter.getHistory(limit) };
+  }));
 
   // Subscribe to webhook events
-  app.post('/api/webhooks/subscribe', authenticate, (req, res) => {
-    try {
-      const { events } = req.body;
-      if (!events || !Array.isArray(events)) {
-        return res.status(400).json({ error: 'Missing "events" array' });
-      }
-      if (!whatsappClient.webhookEmitter) {
-        return res.status(400).json({ error: 'Webhook emitter not initialized' });
-      }
-      whatsappClient.webhookEmitter.subscribe(events);
-      res.json({
-        success: true,
-        subscriptions: Array.from(whatsappClient.webhookEmitter.subscriptions),
-      });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+  app.post('/api/webhooks/subscribe', authenticate, wrapHandler((req) => {
+    const { events } = req.body;
+    if (!events || !Array.isArray(events)) {
+      throw new ValidationError('Missing "events" array');
     }
-  });
+    if (!whatsappClient.webhookEmitter) {
+      throw new ValidationError('Webhook emitter not initialized');
+    }
+    whatsappClient.webhookEmitter.subscribe(events);
+    return {
+      success: true,
+      subscriptions: Array.from(whatsappClient.webhookEmitter.subscriptions),
+    };
+  }));
 
   // Unsubscribe from webhook events
-  app.post('/api/webhooks/unsubscribe', authenticate, (req, res) => {
-    try {
-      const { events } = req.body;
-      if (!events || !Array.isArray(events)) {
-        return res.status(400).json({ error: 'Missing "events" array' });
-      }
-      if (!whatsappClient.webhookEmitter) {
-        return res.status(400).json({ error: 'Webhook emitter not initialized' });
-      }
-      whatsappClient.webhookEmitter.unsubscribe(events);
-      res.json({
-        success: true,
-        subscriptions: Array.from(whatsappClient.webhookEmitter.subscriptions),
-      });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+  app.post('/api/webhooks/unsubscribe', authenticate, wrapHandler((req) => {
+    const { events } = req.body;
+    if (!events || !Array.isArray(events)) {
+      throw new ValidationError('Missing "events" array');
     }
-  });
+    if (!whatsappClient.webhookEmitter) {
+      throw new ValidationError('Webhook emitter not initialized');
+    }
+    whatsappClient.webhookEmitter.unsubscribe(events);
+    return {
+      success: true,
+      subscriptions: Array.from(whatsappClient.webhookEmitter.subscriptions),
+    };
+  }));
 
   // Enable/disable webhooks
-  app.post('/api/webhooks/toggle', authenticate, (req, res) => {
-    try {
-      const { enabled } = req.body;
-      if (typeof enabled !== 'boolean') {
-        return res.status(400).json({ error: 'Missing "enabled" boolean' });
-      }
-      if (!whatsappClient.webhookEmitter) {
-        return res.status(400).json({ error: 'Webhook emitter not initialized' });
-      }
-      whatsappClient.webhookEmitter.setEnabled(enabled);
-      res.json({ success: true, enabled });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+  app.post('/api/webhooks/toggle', authenticate, wrapHandler((req) => {
+    const { enabled } = req.body;
+    if (typeof enabled !== 'boolean') {
+      throw new ValidationError('Missing "enabled" boolean');
     }
-  });
+    if (!whatsappClient.webhookEmitter) {
+      throw new ValidationError('Webhook emitter not initialized');
+    }
+    whatsappClient.webhookEmitter.setEnabled(enabled);
+    return { success: true, enabled };
+  }));
 
   // Get pending webhook retries
-  app.get('/api/webhooks/retries', authenticate, (req, res) => {
-    try {
-      if (!whatsappClient.webhookEmitter) {
-        return res.json({ pending: [] });
-      }
-      res.json({ pending: whatsappClient.webhookEmitter.getPendingRetries() });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+  app.get('/api/webhooks/retries', authenticate, wrapHandler(() => {
+    if (!whatsappClient.webhookEmitter) {
+      return { pending: [] };
     }
-  });
+    return { pending: whatsappClient.webhookEmitter.getPendingRetries() };
+  }));
 
   // Process pending webhook retries
-  app.post('/api/webhooks/retries', authenticate, async (req, res) => {
-    try {
-      if (!whatsappClient.webhookEmitter) {
-        return res.json({ processed: 0 });
-      }
-      const result = await whatsappClient.webhookEmitter.processRetries();
-      res.json(result);
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+  app.post('/api/webhooks/retries', authenticate, wrapHandler(async () => {
+    if (!whatsappClient.webhookEmitter) {
+      return { processed: 0 };
     }
-  });
+    return await whatsappClient.webhookEmitter.processRetries();
+  }));
 
   // Test webhook (send test event)
-  app.post('/api/webhooks/test', authenticate, async (req, res) => {
-    try {
-      if (!whatsappClient.webhookEmitter) {
-        return res.status(400).json({ error: 'Webhook emitter not initialized' });
-      }
-      const result = await whatsappClient.webhookEmitter.emit('webhook.test', {
-        message: 'Test webhook from wa2bridge',
-        timestamp: Date.now(),
-      });
-      res.json(result);
-    } catch (error) {
-      res.status(500).json({ error: error.message });
+  app.post('/api/webhooks/test', authenticate, wrapHandler(async () => {
+    if (!whatsappClient.webhookEmitter) {
+      throw new ValidationError('Webhook emitter not initialized');
     }
-  });
+    return await whatsappClient.webhookEmitter.emit('webhook.test', {
+      message: 'Test webhook from wa2bridge',
+      timestamp: Date.now(),
+    });
+  }));
 
   // Get available webhook event types
-  app.get('/api/webhooks/events', authenticate, (req, res) => {
-    try {
-      // Return available event types
-      res.json({
-        events: {
-          message: [
-            'message.received',
-            'message.sent',
-            'message.delivered',
-            'message.read',
-            'message.failed',
-          ],
-          presence: [
-            'presence.online',
-            'presence.offline',
-            'presence.typing',
-            'presence.recording',
-          ],
-          connection: [
-            'connection.open',
-            'connection.close',
-            'connection.qr_update',
-            'connection.logged_out',
-          ],
-          contact: [
-            'contact.profile_update',
-            'contact.blocked',
-            'contact.unblocked',
-          ],
-          status: [
-            'status.view',
-            'status.reaction',
-          ],
-          antiban: [
-            'antiban.warning',
-            'antiban.hibernation',
-            'antiban.rate_limit',
-          ],
-        },
-      });
-    } catch (error) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.get('/api/webhooks/events', authenticate, wrapHandler(() => {
+    return {
+      events: {
+        message: [
+          'message.received',
+          'message.sent',
+          'message.delivered',
+          'message.read',
+          'message.failed',
+        ],
+        presence: [
+          'presence.online',
+          'presence.offline',
+          'presence.typing',
+          'presence.recording',
+        ],
+        connection: [
+          'connection.open',
+          'connection.close',
+          'connection.qr_update',
+          'connection.logged_out',
+        ],
+        contact: [
+          'contact.profile_update',
+          'contact.blocked',
+          'contact.unblocked',
+        ],
+        status: [
+          'status.view',
+          'status.reaction',
+        ],
+        antiban: [
+          'antiban.warning',
+          'antiban.hibernation',
+          'antiban.rate_limit',
+        ],
+      },
+    };
+  }));
 
   // ==========================================================================
   // Server-Sent Events Endpoint
@@ -1397,30 +1075,14 @@ export function createApiServer(whatsappClient, options = {}) {
     });
   });
 
-  // Global error handler - catches unhandled errors
-  app.use((err, req, res, next) => {
-    console.error(`[${req.requestId}] Unhandled error:`, err);
-
-    // Don't leak error details in production
-    const isDev = process.env.NODE_ENV !== 'production';
-
-    res.status(err.status || 500).json({
-      error: err.message || 'Internal server error',
-      requestId: req.requestId,
-      ...(isDev && { stack: err.stack }),
-    });
-  });
-
-  // 404 handler for undefined routes
-  app.use((req, res) => {
-    res.status(404).json({
-      error: 'Not found',
-      message: `Route ${req.method} ${req.path} not found`,
-    });
-  });
-
-  // Setup Swagger documentation
+  // Setup Swagger documentation (before error handlers)
   setupSwagger(app);
+
+  // 404 handler for undefined routes (after all routes, before error handler)
+  app.use(notFoundHandler);
+
+  // Global error handler - catches all errors from wrapHandler
+  app.use(errorHandler);
 
   return app;
 }

@@ -9,7 +9,7 @@ import qrcode from 'qrcode-terminal';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
-// Anti-ban utilities
+// Anti-ban utilities (modular structure)
 import {
   humanDelay,
   calculateTypingDuration,
@@ -61,10 +61,16 @@ import {
   AutoResponder,
   MessageTemplates,
   ScheduledMessages,
-} from './anti-ban.js';
+} from './anti-ban/index.js';
 
 // Phase 6: Enhanced webhook events
 import { WebhookEventEmitter } from './webhook-events.js';
+
+// Lifecycle management
+import { LifecycleManager } from './lifecycle-manager.js';
+
+// Timer management (prevents leaks on disconnect)
+import { TimerRegistry } from './utils/timer-registry.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -133,6 +139,9 @@ class WhatsAppClient {
     };
 
     this.logger = pino({ level: options.logLevel || 'info' });
+
+    // Timer management (prevents leaks on disconnect)
+    this.timers = new TimerRegistry('WhatsAppClient');
 
     // Anti-ban components
     this.rateLimiter = new MessageRateLimiter({
@@ -350,6 +359,9 @@ class WhatsAppClient {
     // Track incoming message for read receipts
     this.lastIncomingMessage = null;
 
+    // Lifecycle management - track all components for proper cleanup
+    this._initializeLifecycle();
+
     // Warn on startup about account age setting
     const limits = this.rateLimiter.getLimits();
     this.logger.info({ limits: limits.description }, 'Rate limits configured');
@@ -459,7 +471,7 @@ class WhatsAppClient {
           reason: this.getDisconnectReasonName(statusCode)
         }, 'Scheduling reconnection with backoff');
 
-        setTimeout(() => this.connect(), reconnectDelay);
+        this.timers.setTimeout(() => this.connect(), reconnectDelay);
       }
 
       if (connection === 'open') {
@@ -621,7 +633,7 @@ class WhatsAppClient {
     if (autoResponse?.matched) {
       this.logger.info({ from, rule: autoResponse.rule.id }, 'Auto-responder triggered');
       // Schedule auto-reply with human delay
-      setTimeout(() => {
+      this.timers.setTimeout(() => {
         this.sendMessage(`+${from}`, autoResponse.response).catch(err => {
           this.logger.error({ error: err.message }, 'Auto-response failed');
         });
@@ -657,7 +669,7 @@ class WhatsAppClient {
 
     // Mark message as "read" after realistic delay
     const readDelay = calculateReadDelay(text);
-    setTimeout(async () => {
+    this.timers.setTimeout(async () => {
       try {
         await this.socket.readMessages([message.key]);
         this.logger.debug({ from, readDelay }, 'Marked message as read');
@@ -1116,43 +1128,32 @@ class WhatsAppClient {
   }
 
   async disconnect() {
-    // Stop presence cycling
-    this.presenceManager.stopPresenceCycle();
+    this.logger.info('Disconnecting WhatsApp client...');
 
-    // Phase 2: Stop network check interval
+    // Clear all tracked timers (reconnection, auto-response, read receipts)
+    this.timers.clearAll();
+
+    // Clear network check interval (not managed by lifecycle)
     if (this.networkCheckInterval) {
       clearInterval(this.networkCheckInterval);
       this.networkCheckInterval = null;
     }
 
-    // Phase 2: Cleanup delivery tracker
-    this.deliveryTracker.destroy();
-
-    // Phase 2: Clear message queue
-    this.messageScheduler.clear();
-
-    // Phase 3: Stop status viewing
-    this.statusViewer.stopViewing();
-
-    // Phase 4: Stop services and save state
-    this.healthMonitor.stop();
-    this.sessionManager.stopAutoBackup();
-    this.persistentQueue.saveQueue(); // Save pending messages
-    this.webhookManager.saveFailedQueue(); // Save failed webhooks
-
-    // Phase 5: Stop services and cleanup
-    this.scheduledMessages.stop();
-    this.apiRateLimiter.destroy();
-
-    // Phase 5: Log system event
+    // Log system event before cleanup
     this.auditLogger.logSystem('whatsapp_disconnected', {
       phone: this.phoneNumber,
     });
 
+    // Cleanup all components via lifecycle manager (reverse order)
+    await this.lifecycle.destroyAll(this.logger);
+
+    // Logout from WhatsApp
     if (this.socket) {
       await this.socket.logout();
       this.isConnected = false;
     }
+
+    this.logger.info('WhatsApp client disconnected');
   }
 
   /**
@@ -1169,6 +1170,71 @@ class WhatsAppClient {
   resetBanWarning() {
     this.banWarning.resetMetrics();
     this.logger.info('Ban warning metrics reset');
+  }
+
+  /**
+   * Initialize lifecycle tracking for all components.
+   * Components are tracked in order they should be destroyed (reverse of creation).
+   * @private
+   */
+  _initializeLifecycle() {
+    this.lifecycle = new LifecycleManager();
+
+    // Phase 1: Core components
+    this.lifecycle.track('rateLimiter', this.rateLimiter, 'saveStats');
+    this.lifecycle.track('reconnectionManager', this.reconnectionManager);
+    this.lifecycle.track('activityTracker', this.activityTracker, 'saveStats');
+    this.lifecycle.track('presenceManager', this.presenceManager, 'stopPresenceCycle');
+    this.lifecycle.track('banWarning', this.banWarning, 'saveState');
+    this.lifecycle.track('messageVariator', this.messageVariator);
+
+    // Phase 2: Enhanced anti-ban
+    this.lifecycle.track('deliveryTracker', this.deliveryTracker, 'destroy');
+    this.lifecycle.track('activityRamper', this.activityRamper, 'saveState');
+    this.lifecycle.track('weekendPatterns', this.weekendPatterns);
+    this.lifecycle.track('typingSimulator', this.typingSimulator);
+    this.lifecycle.track('emojiEnhancer', this.emojiEnhancer);
+    this.lifecycle.track('contactWarmup', this.contactWarmup, 'saveState');
+    this.lifecycle.track('groupBehavior', this.groupBehavior);
+    this.lifecycle.track('networkFingerprint', this.networkFingerprint, 'saveState');
+    this.lifecycle.track('messageScheduler', this.messageScheduler, 'clear');
+
+    // Phase 3: Behavioral simulation
+    this.lifecycle.track('reactionManager', this.reactionManager);
+    this.lifecycle.track('replyProbability', this.replyProbability, 'saveState');
+    this.lifecycle.track('messageSplitter', this.messageSplitter);
+    this.lifecycle.track('statusViewer', this.statusViewer, 'stopViewing');
+    this.lifecycle.track('spamDetector', this.spamDetector, 'saveState');
+    this.lifecycle.track('geoMatcher', this.geoMatcher, 'saveState');
+    this.lifecycle.track('profileViewer', this.profileViewer, 'saveState');
+    this.lifecycle.track('forwardHandler', this.forwardHandler);
+    this.lifecycle.track('conversationMemory', this.conversationMemory, 'saveState');
+
+    // Phase 4: Detection & Recovery
+    this.lifecycle.track('blockDetector', this.blockDetector, 'saveState');
+    this.lifecycle.track('sessionManager', this.sessionManager, 'stopAutoBackup');
+    this.lifecycle.track('persistentQueue', this.persistentQueue, 'saveQueue');
+    this.lifecycle.track('webhookManager', this.webhookManager, 'saveFailedQueue');
+    this.lifecycle.track('webhookEmitter', this.webhookEmitter, 'destroy');
+    this.lifecycle.track('healthMonitor', this.healthMonitor, 'stop');
+    this.lifecycle.track('languageDetector', this.languageDetector, 'saveState');
+
+    // Phase 5A: Analytics & Intelligence
+    this.lifecycle.track('analytics', this.analytics, 'saveState');
+    this.lifecycle.track('contactScoring', this.contactScoring, 'saveState');
+    this.lifecycle.track('sentimentDetector', this.sentimentDetector, 'saveState');
+
+    // Phase 5B: Security Hardening
+    this.lifecycle.track('ipWhitelist', this.ipWhitelist, 'saveState');
+    this.lifecycle.track('auditLogger', this.auditLogger, 'flush');
+    this.lifecycle.track('apiRateLimiter', this.apiRateLimiter, 'destroy');
+
+    // Phase 5C: Smart Automation
+    this.lifecycle.track('autoResponder', this.autoResponder, 'saveState');
+    this.lifecycle.track('messageTemplates', this.messageTemplates, 'saveState');
+    this.lifecycle.track('scheduledMessages', this.scheduledMessages, 'stop');
+
+    this.logger.debug({ components: this.lifecycle.size }, 'Lifecycle tracking initialized');
   }
 }
 

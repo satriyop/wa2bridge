@@ -77,12 +77,15 @@ const app = createApiServer(whatsapp, { apiSecret: API_SECRET });
 // Real-Time Event Broadcasting (SSE)
 // ==========================================================================
 
+// Track interval for graceful shutdown
+let broadcastInterval = null;
+
 /**
  * Set up real-time event broadcasting from WhatsApp client to dashboard
  */
 function setupEventBroadcasting() {
   // Broadcast status changes periodically (every 2 seconds for live updates)
-  setInterval(() => {
+  broadcastInterval = setInterval(() => {
     if (app.broadcast) {
       const status = whatsapp.getStatus();
       app.broadcast('status', status);
@@ -319,6 +322,12 @@ async function gracefulShutdown(signal) {
   isShuttingDown = true;
 
   console.log(`\n${signal} received, shutting down gracefully...`);
+
+  // 0. Stop broadcast interval
+  if (broadcastInterval) {
+    clearInterval(broadcastInterval);
+    broadcastInterval = null;
+  }
 
   // 1. Stop accepting new HTTP connections
   if (server) {
