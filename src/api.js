@@ -659,6 +659,11 @@ export function createApiServer(whatsappClient, options = {}) {
     return whatsappClient.analytics.getSummary();
   }));
 
+  // Get peak messaging hours (MUST be before /:phone to avoid route collision)
+  app.get('/api/analytics/peak-hours', authenticate, wrapHandler(() => {
+    return whatsappClient.analytics.getPeakHours();
+  }));
+
   // Get analytics for specific contact
   app.get('/api/analytics/:phone', authenticate, wrapHandler((req) => {
     const { phone } = req.params;
@@ -666,14 +671,20 @@ export function createApiServer(whatsappClient, options = {}) {
     return stats || { error: 'Contact not found' };
   }));
 
-  // Get peak messaging hours
-  app.get('/api/analytics/peak-hours', authenticate, wrapHandler(() => {
-    return whatsappClient.analytics.getPeakHours();
-  }));
-
   // Get contact scoring stats
   app.get('/api/scoring', authenticate, wrapHandler(() => {
     return whatsappClient.contactScoring.getStats();
+  }));
+
+  // Get top contacts by score (MUST be before /:phone to avoid route collision)
+  app.get('/api/scoring/top/:limit', authenticate, wrapHandler((req) => {
+    const limit = parseInt(req.params.limit) || 10;
+    return whatsappClient.contactScoring.getTopContacts(limit);
+  }));
+
+  // Get contacts needing attention (MUST be before /:phone to avoid route collision)
+  app.get('/api/scoring/attention', authenticate, wrapHandler(() => {
+    return whatsappClient.contactScoring.getContactsNeedingAttention();
   }));
 
   // Get score for specific contact
@@ -682,17 +693,6 @@ export function createApiServer(whatsappClient, options = {}) {
     const score = whatsappClient.contactScoring.getScore(phone);
     const tier = whatsappClient.contactScoring.getTier(phone);
     return { phone, score, tier };
-  }));
-
-  // Get top contacts by score
-  app.get('/api/scoring/top/:limit', authenticate, wrapHandler((req) => {
-    const limit = parseInt(req.params.limit) || 10;
-    return whatsappClient.contactScoring.getTopContacts(limit);
-  }));
-
-  // Get contacts needing attention
-  app.get('/api/scoring/attention', authenticate, wrapHandler(() => {
-    return whatsappClient.contactScoring.getContactsNeedingAttention();
   }));
 
   // Analyze sentiment of text
