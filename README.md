@@ -11,6 +11,16 @@ Enterprise WhatsApp Bridge with Anti-Ban Protection for WhatsApp2App Laravel app
 - **Interactive CLI** - Terminal-based debugging and testing
 - **Swagger Docs** - OpenAPI documentation at `/api-docs`
 
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [Architecture](./docs/ARCHITECTURE.md) | System overview, module responsibilities, data flow |
+| [Anti-Ban System](./docs/ANTI-BAN-SYSTEM.md) | 6 phases of protection, tuning guide, emergency procedures |
+| [API Reference](./docs/API-REFERENCE.md) | Complete endpoint documentation with examples |
+| [Developer Guide](./docs/DEVELOPER-GUIDE.md) | How to extend the system, add features |
+| [Configuration](./docs/CONFIGURATION.md) | All environment variables, production setup |
+
 ## Quick Start
 
 ```bash
