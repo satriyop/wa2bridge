@@ -1,0 +1,90 @@
+# =============================================================================
+# WA2Bridge Docker Compose Configuration
+# =============================================================================
+# Usage:
+#   Development: docker compose up
+#   Production:  docker compose -f docker-compose.yml up -d
+#   Build:       docker compose build
+#   Logs:        docker compose logs -f wa2bridge
+# =============================================================================
+
+services:
+  wa2bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: wa2bridge:latest
+    container_name: wa2bridge
+    restart: unless-stopped
+
+    # Port mapping (host:container)
+    ports:
+      - "${PORT:-3000}:3000"
+
+    # Environment variables
+    environment:
+      - NODE_ENV=${NODE_ENV:-production}
+      - PORT=3000
+      - HOST=0.0.0.0
+      - API_SECRET=${API_SECRET}
+      - WEBHOOK_URL=${WEBHOOK_URL}
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+      - CORS_ORIGIN=${CORS_ORIGIN:-*}
+      # Anti-ban configuration
+      - ACCOUNT_AGE_WEEKS=${ACCOUNT_AGE_WEEKS:-4}
+      - MESSAGE_DELAY_MS=${MESSAGE_DELAY_MS:-1500}
+      - TYPING_DELAY_MS=${TYPING_DELAY_MS:-500}
+      - ACTIVE_HOURS_START=${ACTIVE_HOURS_START:-7}
+      - ACTIVE_HOURS_END=${ACTIVE_HOURS_END:-23}
+      # Rate limits (optional overrides)
+      - RATE_LIMIT_WEEK1_HOURLY=${RATE_LIMIT_WEEK1_HOURLY:-5}
+      - RATE_LIMIT_WEEK1_DAILY=${RATE_LIMIT_WEEK1_DAILY:-15}
+      - RATE_LIMIT_WARMING_HOURLY=${RATE_LIMIT_WARMING_HOURLY:-15}
+      - RATE_LIMIT_WARMING_DAILY=${RATE_LIMIT_WARMING_DAILY:-40}
+      - RATE_LIMIT_MATURE_HOURLY=${RATE_LIMIT_MATURE_HOURLY:-30}
+      - RATE_LIMIT_MATURE_DAILY=${RATE_LIMIT_MATURE_DAILY:-150}
+      # Reconnection
+      - RECONNECT_MAX_ATTEMPTS=${RECONNECT_MAX_ATTEMPTS:-15}
+      # IP rate limiting
+      - IP_RATE_LIMIT=${IP_RATE_LIMIT:-100}
+      # Behavioral patterns
+      - HOLIDAYS=${HOLIDAYS:-01-01,12-25,12-31,08-17}
+      - REACTION_PROBABILITY=${REACTION_PROBABILITY:-0.15}
+      - EMOJI_PROBABILITY=${EMOJI_PROBABILITY:-0.20}
+
+    # Session persistence - CRITICAL for WhatsApp authentication
+    # Sessions contain WhatsApp credentials and encryption keys
+    volumes:
+      - wa2bridge-sessions:/app/sessions
+
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+
+    # Graceful shutdown - 45s matches queue drain time in src/index.js
+    stop_grace_period: 45s
+
+    # Health check (overrides Dockerfile if needed)
+    healthcheck:
+      test: ["CMD", "node", "-e", "const http = require('http'); const port = process.env.PORT || 3000; http.get('http://localhost:' + port + '/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+      retries: 3
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# Named volumes for data persistence
+volumes:
+  wa2bridge-sessions:
+    name: wa2bridge-sessions
+    driver: local

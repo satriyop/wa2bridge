@@ -1,0 +1,84 @@
+# =============================================================================
+# Docker Build Context Exclusions
+# =============================================================================
+# Only include: src/, dashboard/src/, types/, package*.json
+# Exclude: Everything else (node_modules will be built fresh)
+# =============================================================================
+
+# Version Control
+.git/
+.gitignore
+.github/
+
+# Dependencies (will be installed fresh in container)
+node_modules/
+dashboard/node_modules/
+
+# Sessions (mounted as volume, not baked into image)
+sessions/
+sessions-backup/
+
+# Build Output (dashboard builds during Docker build)
+dashboard/dist/
+dist/
+dist-ssr/
+
+# Testing
+tests/
+*.test.js
+coverage/
+.vitest/
+
+# Documentation (not needed at runtime)
+docs/
+README.md
+CLAUDE.md
+*.md
+!package.json
+!package-lock.json
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.claude/
+
+# Logs (should not be in image)
+logs/
+*.log
+npm-debug.log*
+
+# Environment Files (secrets via ENV vars or mounted)
+.env
+.env.*
+!.env.example
+
+# Temporary Files
+tmp/
+temp/
+*.tmp
+
+# Ideas & Planning (development only)
+ideas/
+
+# Linting & Formatting Config
+.eslintrc*
+.prettierrc*
+.editorconfig
+
+# OS Files
+Thumbs.db
+Desktop.ini
+
+# Vitest Config (testing not run in production image)
+vitest.config.js
+
+# TypeScript Build Cache
+*.tsbuildinfo
+
+# Package Manager Locks (npm only, keep package-lock.json)
+yarn.lock
+pnpm-lock.yaml
